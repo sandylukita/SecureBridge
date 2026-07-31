@@ -18,7 +18,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from datetime import datetime
-from iec62443_mapper import (
+from compliance.iec62443_mapper import (
     FINDING_TO_IEC, IEC62443_REQUIREMENTS,
     calculate_compliance_score, get_priority_findings
 )

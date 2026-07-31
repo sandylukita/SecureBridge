@@ -15,7 +15,9 @@ import plotly.express as px
 import streamlit as st
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from config.settings import load_config
 from core.detection.model import AnomalyScorer, classify_severity
 from core.advisor.claude import ThreatAdvisor
@@ -514,7 +516,7 @@ if st.session_state.get("gen_report"):
     st.session_state["gen_report"] = False
     with st.spinner("Generating compliance report..."):
         try:
-            sys.path.insert(0, "compliance")
+            # compliance module is already accessible via project root in sys.path
             from compliance.report_generator import generate_report
             from compliance.iec62443_mapper import calculate_compliance_score, FINDING_TO_IEC
 

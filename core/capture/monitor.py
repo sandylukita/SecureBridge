@@ -20,7 +20,10 @@ import struct
 from datetime import datetime
 from queue import Queue
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path so all modules resolve correctly
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 from config.settings import load_config
 
 # ─────────────────────────────────────────────────────────
