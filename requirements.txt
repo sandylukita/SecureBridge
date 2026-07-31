@@ -1,0 +1,30 @@
+# SecureBridge OT Security Platform
+# Requirements
+
+# Core
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# OT Protocol
+pymodbus>=3.5.0
+
+# ML Detection
+scikit-learn>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# LLM Integration
+anthropic>=0.30.0
+
+# Dashboard
+streamlit>=1.28.0
+plotly>=5.17.0
+
+# PDF Reports
+reportlab>=4.0.0
+
+# Alerts
+# telegram alerts use built-in urllib (no extra package needed)
+
+# Utilities
+schedule>=1.2.0

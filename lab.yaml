@@ -1,0 +1,39 @@
+# SecureBridge — Lab / Demo Configuration
+# Use this for showcase and development
+
+mode: lab
+
+capture:
+  interface: "127.0.0.1"        # Loopback for lab
+  target_network: "127.0.0.0/8"
+  buffer_size: 65536
+
+simulator:
+  enabled: true
+  plc_count: 3
+  polling_interval: 5            # seconds
+  inject_anomalies: false        # Set true for demo
+
+detection:
+  anomaly_threshold: 60.0        # 0-100 score
+  baseline_hours: 1              # Short for lab
+  retrain_interval_hours: 24
+
+alerts:
+  email_enabled: false
+  telegram_enabled: false
+  min_severity: "MEDIUM"
+
+dashboard:
+  host: "localhost"
+  port: 8501
+  refresh_seconds: 5
+
+compliance:
+  client_name: "PT Nusantara Instrumen (Demo)"
+  consultant_name: "Sandy Lukita"
+  consulting_firm: "PT Optima Sarana Instrument"
+  report_output_dir: "data/reports"
+
+log_dir: "data/logs"
+data_dir: "data"

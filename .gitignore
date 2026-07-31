@@ -1,0 +1,35 @@
+# Environment
+.env
+*.env
+
+# Config with credentials (use templates only)
+config/active.yaml
+config/live.yaml
+
+# Data (too large for git)
+data/logs/*.csv
+data/models/*.pkl
+
+# Keep directory structure
+!data/logs/.gitkeep
+!data/models/.gitkeep
+!data/reports/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
