@@ -149,34 +149,123 @@ def parse_modbus_packet(payload: bytes, src_ip: str,
 
 
 # ─────────────────────────────────────────────────────────
-# Live Network Monitor (uses raw sockets)
+# Live Network Monitor
+# Primary  : pyshark.LiveCapture (TShark / libpcap)
+# Fallback : raw sockets (AF_INET / SOCK_RAW)
 # ─────────────────────────────────────────────────────────
 
 class LiveMonitor:
     """
-    Passive network monitor using raw sockets
-    Requires: administrator/root privileges
-    Use: SPAN port or network tap on OT segment
+    Passive OT network monitor.
+
+    Capture engine selection (controlled by config.capture.use_pyshark):
+
+    1. PysharkCapture (preferred)
+       Uses pyshark.LiveCapture + libpcap/Npcap with a BPF filter.
+       Supports Modbus TCP, EtherNet/IP, and BACnet/IP.
+       Requires: Npcap (Windows) or libpcap (Linux) + TShark in PATH.
+
+    2. Raw socket fallback
+       Uses socket.AF_INET / SOCK_RAW — Modbus TCP only.
+       Requires: administrator / root privileges.
+       Activated automatically when pyshark or TShark is unavailable.
+
+    Production deployment:
+       Connect interface to SPAN / mirror port — no IP address needed.
+       Interface cannot initiate connections → zero impact on OT operations.
     """
 
-    def __init__(self, interface: str, event_queue: Queue):
-        self.interface = interface
+    def __init__(
+        self,
+        interface: str,
+        event_queue: Queue,
+        use_pyshark: bool = True,
+        bpf_filter: str = "tcp port 502 or tcp port 44818 or udp port 47808",
+    ):
+        self.interface   = interface
         self.event_queue = event_queue
-        self.running = False
-        self._stats = {"packets": 0, "events": 0, "errors": 0}
+        self.use_pyshark = use_pyshark
+        self.bpf_filter  = bpf_filter
+        self.running     = False
+        self._stats      = {"packets": 0, "events": 0, "errors": 0}
+        self._engine     = "none"      # populated when capture starts
 
-    def start(self):
-        """Start passive capture"""
+    # ── Public API ───────────────────────────────────────────
+
+    def start(self) -> None:
+        """Start passive capture — tries pyshark first, falls back to raw socket."""
         self.running = True
-        logger.info(f"Starting live capture on {self.interface}")
-        logger.info("Mode: PASSIVE — zero impact on OT operations")
+
+        if self.use_pyshark and self._try_pyshark():
+            return   # pyshark ran and exited cleanly
+
+        # ── Fallback: raw sockets ──
+        self._start_raw_socket()
+
+    def stop(self) -> None:
+        self.running = False
+
+    # ── Engine 1: Pyshark ────────────────────────────────────
+
+    def _try_pyshark(self) -> bool:
+        """
+        Attempt to start PysharkCapture.
+
+        Returns True  if pyshark started successfully (even if it later stopped).
+        Returns False if pyshark / tshark is unavailable → caller should fallback.
+        """
+        try:
+            from core.capture.pyshark_capture import PysharkCapture
+
+            cap = PysharkCapture(
+                interface=self.interface,
+                event_queue=self.event_queue,
+                bpf_filter=self.bpf_filter,
+            )
+            self._engine = "pyshark"
+
+            logger.info("Capture engine  : pyshark.LiveCapture (primary)")
+            logger.info(f"BPF filter      : {self.bpf_filter}")
+            logger.info("Interface mode  : PASSIVE — no IP, no TX")
+
+            cap.start()   # blocking
+
+            # Sync stats back
+            ps_stats = cap.get_stats()
+            self._stats["packets"] = ps_stats["packets_total"]
+            self._stats["events"]  = ps_stats["events_emitted"]
+            self._stats["errors"]  = ps_stats["errors"]
+            return True
+
+        except ImportError:
+            logger.warning(
+                "pyshark not installed — run: pip install pyshark"
+            )
+        except Exception as exc:
+            # TShark not found, Npcap missing, permission denied, etc.
+            logger.warning(
+                f"pyshark unavailable ({type(exc).__name__}: {exc})"
+            )
+        return False
+
+    # ── Engine 2: Raw socket fallback ────────────────────────
+
+    def _start_raw_socket(self) -> None:
+        """
+        Fallback passive capture using AF_INET / SOCK_RAW.
+        Covers Modbus TCP (port 502) only.
+        Requires administrator / root privileges.
+        """
+        self._engine = "raw_socket"
+        logger.info("Capture engine  : raw socket (fallback)")
+        logger.info("Protocol support: Modbus TCP only")
+        logger.info("Mode            : PASSIVE — zero impact on OT operations")
 
         try:
-            # Raw socket for live capture
             sock = socket.socket(
                 socket.AF_INET,
                 socket.SOCK_RAW,
-                socket.IPPROTO_TCP
+                socket.IPPROTO_TCP,
             )
             sock.settimeout(1.0)
 
@@ -184,54 +273,48 @@ class LiveMonitor:
                 try:
                     packet, addr = sock.recvfrom(65535)
                     self._stats["packets"] += 1
-                    self._process_packet(packet, addr)
+                    self._process_raw_packet(packet, addr)
                 except socket.timeout:
                     continue
-                except Exception as e:
+                except Exception as exc:
                     self._stats["errors"] += 1
-                    logger.debug(f"Packet error: {e}")
+                    logger.debug(f"Packet error: {exc}")
 
         except PermissionError:
-            logger.error("Root/admin required for live capture")
-            logger.info("Falling back to lab mode")
+            logger.error(
+                "Root / administrator privileges required for raw socket capture."
+            )
+            logger.info("Tip: On Windows run as Administrator; on Linux use sudo.")
         finally:
-            logger.info(f"Capture stats: {self._stats}")
+            logger.info(f"Raw socket capture stopped. Stats: {self._stats}")
 
-    def stop(self):
-        self.running = False
-
-    def _process_packet(self, packet: bytes, addr: tuple):
-        """Extract TCP payload and check for OT protocols"""
+    def _process_raw_packet(self, packet: bytes, addr: tuple) -> None:
+        """Extract TCP payload and route to Modbus parser (raw socket fallback)."""
         try:
-            # Skip IP header (typically 20 bytes)
             ip_header_len = (packet[0] & 0xF) * 4
-            tcp_start = ip_header_len
+            tcp_start     = ip_header_len
 
             if len(packet) < tcp_start + 20:
                 return
 
-            # Extract IPs from IP header
             src_ip = socket.inet_ntoa(packet[12:16])
             dst_ip = socket.inet_ntoa(packet[16:20])
 
-            # TCP header
-            tcp_header = packet[tcp_start:tcp_start + 20]
-            dst_port = struct.unpack(">H", tcp_header[2:4])[0]
-
-            # TCP payload
+            tcp_header     = packet[tcp_start:tcp_start + 20]
+            dst_port       = struct.unpack(">H", tcp_header[2:4])[0]
             tcp_header_len = ((tcp_header[12] >> 4) & 0xF) * 4
-            payload_start = tcp_start + tcp_header_len
-            payload = packet[payload_start:]
+            payload_start  = tcp_start + tcp_header_len
+            payload        = packet[payload_start:]
 
             if not payload:
                 return
 
-            # Detect and parse OT protocols
             event = None
             if dst_port == MODBUS_PORT:
                 event = parse_modbus_packet(payload, src_ip, dst_ip)
 
             if event:
+                event.data["capture_engine"] = "raw_socket"
                 self._stats["events"] += 1
                 self.event_queue.put(event)
 
@@ -458,12 +541,20 @@ def run_monitor(config_path: str = "config/lab.yaml"):
 
     # Start appropriate monitor/simulator
     if config.mode == "live":
-        monitor = LiveMonitor(config.capture.interface, event_queue)
+        monitor = LiveMonitor(
+            interface=config.capture.interface,
+            event_queue=event_queue,
+            use_pyshark=config.capture.use_pyshark,
+            bpf_filter=config.capture.bpf_filter,
+        )
         monitor_thread = threading.Thread(
             target=monitor.start, daemon=True
         )
         monitor_thread.start()
-        logger.info("✅ Live monitoring active — passive mode")
+        logger.info(
+            f"✅ Live monitoring active — "
+            f"engine: {'pyshark' if config.capture.use_pyshark else 'raw_socket'}"
+        )
 
     else:
         simulator = LabSimulator(event_queue, plc_count=3)

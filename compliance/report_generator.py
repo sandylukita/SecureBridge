@@ -946,7 +946,7 @@ def generate_report(client_data: dict, output_path: str):
 
     # Build PDF
     doc.build(story)
-    print(f"\n✅ Report generated: {output_path}")
+    print(f"\n[OK] Report generated: {output_path}")
     print(f"   Client: {client_data['client_name']}")
     print(f"   Compliance Score: {compliance_score['overall_score']}%")
     print(f"   Security Level: {compliance_score['security_level']}")

@@ -1,0 +1,39 @@
+# SecureBridge .dockerignore
+
+# Credentials — NEVER in Docker image
+.env
+*.env
+config/live.yaml
+config/active.yaml
+
+# Data — use volumes instead
+data/logs/*
+data/models/*
+data/reports/*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+
+# Dev tools
+.vscode/
+.idea/
+*.swp
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Test files
+tests/
+*.test.py

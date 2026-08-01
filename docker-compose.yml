@@ -1,0 +1,223 @@
+# SecureBridge OT Security Platform
+# Docker Compose — Full Stack
+#
+# Usage:
+#   Lab/Demo:    docker-compose up -d
+#   With Ollama: docker-compose --profile ollama up -d
+#   Air-gapped:  docker-compose --profile airgapped up -d
+#
+# Sandy Lukita | PT Optima Sarana Instrument
+
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────
+# Shared volumes
+# ─────────────────────────────────────────────────────────
+
+volumes:
+  ot_data:          # Shared OT event logs
+  ml_models:        # Trained ML models
+  reports:          # Generated PDF reports
+  ollama_models:    # Ollama downloaded LLM weights
+
+# ─────────────────────────────────────────────────────────
+# Network isolation — mirrors real OT architecture
+# ─────────────────────────────────────────────────────────
+
+networks:
+  # IT zone — dashboard, alerts, external access
+  it_zone:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.10.0/24
+
+  # OT zone — simulator, monitor (isolated)
+  ot_zone:
+    driver: bridge
+    internal: true      # No external internet access
+    ipam:
+      config:
+        - subnet: 172.20.30.0/24
+
+  # DMZ zone — SecureBridge engine bridges IT and OT
+  dmz_zone:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.20.0/24
+
+# ─────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────
+
+services:
+
+  # ───────────────────────────────────────────────────────
+  # 1. MODBUS SIMULATOR
+  # Simulates PLC/RTU traffic in OT zone
+  # In live deployment: replace with real SPAN tap
+  # ───────────────────────────────────────────────────────
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securebridge-simulator
+    command: python core/capture/monitor.py config/lab.yaml
+    networks:
+      ot_zone:
+        ipv4_address: 172.20.30.10
+    volumes:
+      - ot_data:/app/data/logs
+      - ./config:/app/config:ro
+    environment:
+      - SECUREBRIDGE_MODE=lab
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", 
+             "import os; exit(0 if os.path.exists('data/logs') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "securebridge.zone=ot"
+      - "securebridge.role=simulator"
+
+  # ───────────────────────────────────────────────────────
+  # 2. ML MODEL TRAINER
+  # One-time job to train Isolation Forest on collected data
+  # Runs and exits — dashboard auto-loads the model
+  # ───────────────────────────────────────────────────────
+  model-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securebridge-trainer
+    command: >
+      sh -c "
+        echo 'Waiting for data collection...' &&
+        sleep 60 &&
+        echo 'Training ML model...' &&
+        python core/detection/model.py train data/logs/ot_events_$(date +%Y%m%d).csv &&
+        echo 'Model training complete!'
+      "
+    networks:
+      - dmz_zone
+    volumes:
+      - ot_data:/app/data/logs
+      - ml_models:/app/data/models
+    depends_on:
+      - simulator
+    restart: on-failure:3
+    labels:
+      - "securebridge.zone=dmz"
+      - "securebridge.role=trainer"
+
+  # ───────────────────────────────────────────────────────
+  # 3. SECUREBRIDGE DASHBOARD
+  # Streamlit SOC interface — accessible from IT zone
+  # ───────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securebridge-dashboard
+    command: >
+      streamlit run dashboard/app.py
+      --server.address=0.0.0.0
+      --server.port=8501
+      --server.headless=true
+      --theme.base=dark
+      --theme.primaryColor=#0d7377
+      --theme.backgroundColor=#0f172a
+      --theme.secondaryBackgroundColor=#1e293b
+    ports:
+      - "8501:8501"     # SOC Console access
+    networks:
+      it_zone:
+        ipv4_address: 172.20.10.10
+      dmz_zone:
+        ipv4_address: 172.20.20.10
+    volumes:
+      - ot_data:/app/data/logs:ro      # Read-only OT data
+      - ml_models:/app/data/models:ro  # Read-only models
+      - reports:/app/data/reports      # Write PDF reports
+      - ./config:/app/config:ro
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_HOST=http://ollama:11434
+      - SECUREBRIDGE_MODE=${SECUREBRIDGE_MODE:-auto}
+    depends_on:
+      - simulator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "securebridge.zone=it"
+      - "securebridge.role=dashboard"
+
+  # ───────────────────────────────────────────────────────
+  # 4. OLLAMA — Local LLM (Air-Gapped Mode)
+  # Profile: ollama or airgapped
+  # Pulls llama3.1 on first start (~4.7GB)
+  # Data NEVER leaves the container network
+  # ───────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: securebridge-ollama
+    profiles:
+      - ollama
+      - airgapped
+    networks:
+      dmz_zone:
+        ipv4_address: 172.20.20.20
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=1
+    restart: unless-stopped
+    # Pull model on startup
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 10 &&
+             ollama pull llama3.1 &&
+             echo 'Ollama ready with llama3.1' &&
+             wait"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 30s
+      retries: 10
+      start_period: 120s   # Model download takes time
+    labels:
+      - "securebridge.zone=dmz"
+      - "securebridge.role=llm"
+    # GPU support (uncomment if NVIDIA GPU available)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ───────────────────────────────────────────────────────
+  # 5. ALERT MANAGER (Optional — future service)
+  # Handles email and Telegram notifications
+  # ───────────────────────────────────────────────────────
+  # alertmanager:
+  #   build: .
+  #   command: python alerts/notifier.py
+  #   environment:
+  #     - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+  #     - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+  #     - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+  #   networks:
+  #     - it_zone
+  #   depends_on:
+  #     - dashboard

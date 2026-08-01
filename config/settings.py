@@ -8,6 +8,12 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 @dataclass
 class CaptureConfig:
@@ -15,6 +21,12 @@ class CaptureConfig:
     target_network: str = "192.168.1.0/24"
     buffer_size: int = 65536
     timeout: int = 30
+    use_pyshark: bool = True           # Prefer pyshark over raw sockets
+    bpf_filter: str = (                # Berkeley Packet Filter — OT protocols
+        "tcp port 502 "                # Modbus TCP
+        "or tcp port 44818 "           # EtherNet/IP
+        "or udp port 47808"            # BACnet/IP
+    )
 
 
 @dataclass
@@ -56,6 +68,26 @@ class ComplianceConfig:
 
 
 @dataclass
+class LLMConfig:
+    """
+    LLM backend selection for ThreatAdvisor.
+
+    mode options:
+        auto       — Uses Gemini/Claude if available, fallback to Ollama/Rule engine
+        gemini     — Uses Google Gemini API (free tier, ultra-fast, requires GEMINI_API_KEY)
+        claude     — Always use Claude API (requires ANTHROPIC_API_KEY)
+        ollama     — Always use local Ollama (air-gapped environments)
+        air-gapped — Alias for ollama; makes intent explicit in config
+    """
+    mode: str = "auto"             # auto | gemini | claude | ollama | air-gapped
+    gemini_model: str = "gemini-flash-latest"
+    ollama_model: str = "llama3.1" # Ollama model tag
+    ollama_host: str = "http://localhost:11434"
+    claude_model: str = "claude-sonnet-4-6"
+    max_tokens: int = 1500
+
+
+@dataclass
 class SecureBridgeConfig:
     mode: str = "lab"          # "live" or "lab"
     capture: CaptureConfig = field(default_factory=CaptureConfig)
@@ -63,6 +95,7 @@ class SecureBridgeConfig:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     compliance: ComplianceConfig = field(default_factory=ComplianceConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     log_dir: str = "data/logs"
     data_dir: str = "data"
 
@@ -87,6 +120,11 @@ def load_config(config_path: str = "config/active.yaml") -> SecureBridgeConfig:
             interface=c.get("interface", "eth0"),
             target_network=c.get("target_network", "192.168.1.0/24"),
             buffer_size=c.get("buffer_size", 65536),
+            use_pyshark=c.get("use_pyshark", True),
+            bpf_filter=c.get(
+                "bpf_filter",
+                "tcp port 502 or tcp port 44818 or udp port 47808"
+            ),
         )
 
     if "detection" in raw:
@@ -114,6 +152,17 @@ def load_config(config_path: str = "config/active.yaml") -> SecureBridgeConfig:
             client_name=comp.get("client_name", "Client"),
             consultant_name=comp.get("consultant_name", "Sandy Lukita"),
             consulting_firm=comp.get("consulting_firm", "PT Optima Sarana Instrument"),
+        )
+
+    if "llm" in raw:
+        lc = raw["llm"]
+        config.llm = LLMConfig(
+            mode=lc.get("mode", "auto"),
+            gemini_model=lc.get("gemini_model", "gemini-1.5-flash"),
+            ollama_model=lc.get("ollama_model", "llama3.1"),
+            ollama_host=lc.get("ollama_host", "http://localhost:11434"),
+            claude_model=lc.get("claude_model", "claude-sonnet-4-6"),
+            max_tokens=lc.get("max_tokens", 1500),
         )
 
     return config

@@ -105,11 +105,25 @@ st.markdown("""
 def load_resources():
     config = load_config("config/lab.yaml")
     scorer = AnomalyScorer("data/models/ot_model.pkl")
-    advisor = ThreatAdvisor()
+    # Read LLM mode from config — supports auto/claude/ollama/air-gapped
+    llm_cfg = config.llm
+    advisor = ThreatAdvisor(
+        mode=llm_cfg.mode,
+        ollama_model=llm_cfg.ollama_model,
+        ollama_host=llm_cfg.ollama_host,
+        claude_model=llm_cfg.claude_model,
+        max_tokens=llm_cfg.max_tokens,
+    )
     return config, scorer, advisor
 
 
 config, scorer, advisor = load_resources()
+
+
+@st.cache_data(ttl=3600)
+def get_cached_threat_analysis(event_dict: dict) -> dict:
+    """Cache LLM threat analysis per unique event dict to speed up dashboard rendering"""
+    return advisor.analyze(event_dict)
 
 
 # ─────────────────────────────────────────────────────────
@@ -118,7 +132,7 @@ config, scorer, advisor = load_resources()
 
 @st.cache_data(ttl=10)
 def load_events(hours_back: int = 24) -> pd.DataFrame:
-    """Load recent OT events from log files"""
+    """Load recent OT events from log files."""
     log_dir = "data/logs"
 
     if not os.path.exists(log_dir):
@@ -140,11 +154,16 @@ def load_events(hours_back: int = 24) -> pd.DataFrame:
     df = pd.concat(dfs, ignore_index=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"])
-
-    # Filter by time window
-    cutoff = datetime.now() - timedelta(hours=hours_back)
-    df = df[df["timestamp"] > cutoff]
     df = df.sort_values("timestamp", ascending=True)
+
+    if df.empty:
+        return df
+
+    # Time filter: show last N hours relative to the LATEST event in the data
+    # (not datetime.now()) so lab/demo CSVs are never empty due to date mismatch
+    latest_ts = df["timestamp"].max()
+    cutoff    = latest_ts - timedelta(hours=hours_back)
+    df = df[df["timestamp"] >= cutoff]
 
     return df
 
@@ -185,14 +204,32 @@ st.markdown(f"""
 # Sidebar
 # ─────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────
+# Load & Score Data
+# ─────────────────────────────────────────────────────────
+
+hours_back_default = 24
+df_raw = load_events(hours_back_default)
+df = score_events(df_raw)
+has_data = not df.empty
+
+
+# ─────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────
+
 with st.sidebar:
-    st.image(
-        "https://via.placeholder.com/200x60/1a2744/ffffff?text=SecureBridge",
-        use_container_width=True
-    )
+    # Styled text logo instead of external placeholder image
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#1a2744,#0d4f6b);
+                padding:12px 16px;border-radius:8px;margin-bottom:12px;">
+        <span style="color:white;font-size:18px;font-weight:700;">🔐 SecureBridge</span><br>
+        <span style="color:#b2dfdb;font-size:11px;">OT Security Platform</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("### ⚙️ Dashboard Settings")
-    hours_back = st.slider("Time window (hours)", 1, 48, 6)
+    hours_back = st.slider("Time window (hours)", 1, 168, 24)
     threshold = st.slider("Alert threshold", 0, 100, 60)
     ai_enabled = st.checkbox("Enable AI Analysis", True)
     refresh = st.slider("Refresh interval (sec)", 5, 60, 10)
@@ -209,26 +246,63 @@ with st.sidebar:
     st.caption(f"Threshold: {threshold}/100")
     st.caption(f"Refresh: {refresh}s")
 
+    # LLM backend status
     st.divider()
+    st.markdown("### 🤖 LLM Backend")
+    llm_mode = config.llm.mode
+    llm_model = config.llm.ollama_model if llm_mode in ("ollama", "air-gapped") else config.llm.claude_model
+    mode_label = {
+        "auto":       "Auto (Claude→Ollama)",
+        "claude":     "Cloud (Claude API)",
+        "ollama":     "Local (Ollama)",
+        "air-gapped": "Air-Gapped (Ollama)",
+    }.get(llm_mode, llm_mode)
+    st.caption(f"Mode : {mode_label}")
+    st.caption(f"Model: {llm_model}")
 
-    # Demo controls (lab mode only)
-    if config.mode == "lab":
-        st.markdown("### 🎮 Demo Controls")
-        if st.button("🚨 Inject Anomaly", type="primary"):
-            st.session_state["inject_anomaly"] = True
-            st.success("Anomaly injected!")
-        if st.button("📄 Generate Report"):
-            st.session_state["gen_report"] = True
+    # Report Generation Controls (Sidebar)
+    st.markdown("### 📄 Compliance Report")
+    if st.button("📄 Generate IEC 62443 Report", type="primary"):
+        with st.spinner("Generating PDF report..."):
+            try:
+                from compliance.report_generator import generate_report
+                
+                # Determine live risk level dynamically
+                active_alerts = df[df["anomaly_score"] >= threshold] if has_data and "anomaly_score" in df.columns else pd.DataFrame()
+                has_crit = not active_alerts[active_alerts["severity"] == "CRITICAL"].empty if not active_alerts.empty else False
+                has_high = not active_alerts[active_alerts["severity"] == "HIGH"].empty if not active_alerts.empty else False
+                calc_risk = "CRITICAL" if has_crit else "HIGH" if has_high else "MEDIUM"
 
+                client_data = {
+                    "client_name": config.compliance.client_name,
+                    "consultant": config.compliance.consultant_name,
+                    "consulting_firm": config.compliance.consulting_firm,
+                    "report_date": datetime.now().strftime("%d %B %Y"),
+                    "scope": f"IT/OT Security Assessment — {config.capture.target_network}",
+                    "period": datetime.now().strftime("%B %Y"),
+                    "risk_level": calc_risk,
+                }
+                output_path = os.path.join(
+                    config.compliance.report_output_dir,
+                    f"securebridge_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                )
+                os.makedirs(config.compliance.report_output_dir, exist_ok=True)
+                generate_report(client_data, output_path)
 
-# ─────────────────────────────────────────────────────────
-# Load & Score Data
-# ─────────────────────────────────────────────────────────
+                with open(output_path, "rb") as f:
+                    st.session_state["pdf_bytes"] = f.read()
+                    st.session_state["pdf_filename"] = os.path.basename(output_path)
+                st.success("✅ Report generated!")
+            except Exception as e:
+                st.error(f"Report generation failed: {e}")
 
-df_raw = load_events(hours_back)
-df = score_events(df_raw)
-
-has_data = not df.empty
+    if "pdf_bytes" in st.session_state:
+        st.download_button(
+            label="⬇️ Download PDF Report",
+            data=st.session_state["pdf_bytes"],
+            file_name=st.session_state["pdf_filename"],
+            mime="application/pdf"
+        )
 
 
 # ─────────────────────────────────────────────────────────
@@ -456,7 +530,7 @@ if has_data:
                 with col_b:
                     if ai_enabled:
                         with st.spinner("🤖 AI analyzing threat..."):
-                            analysis = advisor.analyze(row.to_dict())
+                            analysis = get_cached_threat_analysis(row.to_dict())
 
                         st.markdown("**🤖 AI Threat Analysis**")
                         st.write(f"**{analysis.get('threat_summary', 'N/A')}**")
@@ -509,48 +583,6 @@ else:
 
 
 # ─────────────────────────────────────────────────────────
-# Report Generation
-# ─────────────────────────────────────────────────────────
-
-if st.session_state.get("gen_report"):
-    st.session_state["gen_report"] = False
-    with st.spinner("Generating compliance report..."):
-        try:
-            # compliance module is already accessible via project root in sys.path
-            from compliance.report_generator import generate_report
-            from compliance.iec62443_mapper import calculate_compliance_score, FINDING_TO_IEC
-
-            client_data = {
-                "client_name": config.compliance.client_name,
-                "consultant": config.compliance.consultant_name,
-                "consulting_firm": config.compliance.consulting_firm,
-                "report_date": datetime.now().strftime("%d %B %Y"),
-                "scope": "IT/OT Security Assessment",
-                "period": datetime.now().strftime("%B %Y"),
-                "risk_level": "CRITICAL",
-            }
-
-            output_path = os.path.join(
-                config.compliance.report_output_dir,
-                f"securebridge_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-            )
-            os.makedirs(config.compliance.report_output_dir, exist_ok=True)
-            generate_report(client_data, output_path)
-
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    label="📄 Download Compliance Report (PDF)",
-                    data=f,
-                    file_name=os.path.basename(output_path),
-                    mime="application/pdf"
-                )
-            st.success("✅ Report generated successfully!")
-
-        except Exception as e:
-            st.error(f"Report generation failed: {e}")
-
-
-# ─────────────────────────────────────────────────────────
 # Footer
 # ─────────────────────────────────────────────────────────
 
@@ -558,7 +590,7 @@ st.divider()
 st.caption(
     "🔐 SecureBridge OT Security Platform | "
     "Sandy Lukita | PT Optima Sarana Instrument | "
-    "Built with IEC 62443 | Purdue Model | Claude AI"
+    "IEC 62443 | Purdue Model | Claude API + Ollama (Air-Gapped)"
 )
 
 # Auto-refresh
