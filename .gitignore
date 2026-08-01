@@ -9,6 +9,8 @@ config/live.yaml
 # Data (too large for git)
 data/logs/*.csv
 data/models/*.pkl
+data/reports/*.pdf
+*.pdf
 
 # Keep directory structure
 !data/logs/.gitkeep

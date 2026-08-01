@@ -917,6 +917,9 @@ def generate_report(client_data: dict, output_path: str):
         client_data: dict with client info
         output_path: path to save PDF
     """
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     doc = SimpleDocTemplate(
         output_path,
