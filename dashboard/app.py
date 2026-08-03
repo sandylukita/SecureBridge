@@ -1,6 +1,7 @@
 """
-SecureBridge — OT Security Dashboard
+SecureBridge — OT Command Center & SOC Dashboard v1.5.0
 Real-time SOC interface for industrial control system monitoring
+Sandy Lukita | PT Optima Sarana Instrument
 
 Run: streamlit run dashboard/app.py
 """
@@ -10,6 +11,7 @@ import os
 import time
 import json
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
@@ -18,257 +20,235 @@ from datetime import datetime, timedelta
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
+
 from config.settings import load_config
 from core.detection.model import AnomalyScorer, classify_severity
 from core.advisor.claude import ThreatAdvisor
+from core.discovery.asset_registry import AssetRegistry
+from compliance.iec62443_mapper import (
+    FINDING_TO_IEC, IEC62443_REQUIREMENTS,
+    SystemUnderConsideration, generate_risk_register,
+    calculate_compliance_score
+)
 
 # ─────────────────────────────────────────────────────────
 # Page Config
 # ─────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="SecureBridge | OT Security",
+    page_title="SecureBridge | OT Security Command Center",
     page_icon="🔐",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ─────────────────────────────────────────────────────────
-# Styling
+# Cyber SOC Theme Styling (Dark Mode + Glassmorphism)
 # ─────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
-    .main { background-color: #f8f9fa; }
+    /* Dark Theme Core */
+    .stApp { background-color: #0b132b; color: #e0e6ed; }
     .stApp > header { background-color: transparent; }
 
-    /* Header */
+    /* Header Banner */
     .sb-header {
-        background: linear-gradient(135deg, #1a2744 0%, #0d4f6b 100%);
-        padding: 16px 24px;
-        border-radius: 8px;
-        margin-bottom: 16px;
-        color: white;
+        background: linear-gradient(135deg, #1c2541 0%, #0b132b 100%);
+        padding: 18px 26px;
+        border-radius: 10px;
+        border: 1px solid #1f2a44;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     }
-    .sb-header h1 { margin: 0; font-size: 24px; color: white; }
-    .sb-header p { margin: 4px 0 0; font-size: 12px; color: #b2dfdb; }
+    .sb-header h1 { margin: 0; font-size: 26px; color: #48cae4; font-weight: 700; }
+    .sb-header p { margin: 4px 0 0; font-size: 13px; color: #94a3b8; }
 
-    /* Metric cards */
-    .metric-card {
-        background: white;
-        border-radius: 8px;
+    /* Glassmorphism Metric Cards */
+    .soc-card {
+        background: rgba(27, 38, 59, 0.7);
+        border: 1px solid #2a3d66;
+        border-radius: 10px;
         padding: 16px;
-        border-left: 4px solid #0d7377;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        backdrop-filter: blur(8px);
+        margin-bottom: 15px;
     }
-    .metric-critical { border-left-color: #c0392b !important; }
-    .metric-high     { border-left-color: #e67e22 !important; }
-    .metric-ok       { border-left-color: #27ae60 !important; }
+    .soc-card-title { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+    .soc-card-value { font-size: 24px; font-weight: bold; color: #ffffff; margin-top: 4px; }
+    
+    .status-crit { border-left: 4px solid #ff1744 !important; }
+    .status-high { border-left: 4px solid #ff9100 !important; }
+    .status-med  { border-left: 4px solid #ffd600 !important; }
+    .status-ok   { border-left: 4px solid #00e676 !important; }
 
-    /* Alert cards */
-    .alert-critical {
-        background: #fdecea; border: 1px solid #f5c6cb;
-        border-left: 4px solid #c0392b;
-        border-radius: 6px; padding: 12px; margin: 8px 0;
-    }
-    .alert-high {
-        background: #fff3e0; border: 1px solid #ffe0b2;
-        border-left: 4px solid #e67e22;
-        border-radius: 6px; padding: 12px; margin: 8px 0;
-    }
-    .alert-medium {
-        background: #fffde7; border: 1px solid #fff9c4;
-        border-left: 4px solid #f39c12;
-        border-radius: 6px; padding: 12px; margin: 8px 0;
-    }
-
-    /* Status badges */
+    /* Status Badges */
     .badge-live {
-        background: #27ae60; color: white;
-        padding: 2px 10px; border-radius: 12px;
+        background: #00e676; color: #0b132b;
+        padding: 3px 12px; border-radius: 12px;
         font-size: 11px; font-weight: bold;
     }
     .badge-lab {
-        background: #3498db; color: white;
-        padding: 2px 10px; border-radius: 12px;
+        background: #00b4d8; color: #0b132b;
+        padding: 3px 12px; border-radius: 12px;
         font-size: 11px; font-weight: bold;
     }
+
+    /* Expander Container */
+    .stExpander { background-color: #162238 !important; border: 1px solid #233454 !important; border-radius: 8px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-
 # ─────────────────────────────────────────────────────────
-# Load Resources
+# Cache Config & Services
 # ─────────────────────────────────────────────────────────
 
 @st.cache_resource
-def load_resources():
-    config = load_config("config/lab.yaml")
-    scorer = AnomalyScorer("data/models/ot_model.pkl")
-    # Read LLM mode from config — supports auto/claude/ollama/air-gapped
-    llm_cfg = config.llm
-    advisor = ThreatAdvisor(
-        mode=llm_cfg.mode,
-        ollama_model=llm_cfg.ollama_model,
-        ollama_host=llm_cfg.ollama_host,
-        claude_model=llm_cfg.claude_model,
-        max_tokens=llm_cfg.max_tokens,
+def get_config():
+    return load_config("config/lab.yaml")
+
+@st.cache_resource
+def get_scorer():
+    return AnomalyScorer("data/models/ot_model.pkl")
+
+@st.cache_resource
+def get_advisor(_config):
+    return ThreatAdvisor(
+        mode=_config.llm.mode,
+        gemini_model=_config.llm.gemini_model,
+        ollama_model=_config.llm.ollama_model,
+        ollama_host=_config.llm.ollama_host,
+        claude_model=_config.llm.claude_model,
     )
-    return config, scorer, advisor
-
-
-config, scorer, advisor = load_resources()
-
 
 @st.cache_data(ttl=3600)
-def get_cached_threat_analysis(event_dict: dict) -> dict:
-    """Cache LLM threat analysis per unique event dict to speed up dashboard rendering"""
-    return advisor.analyze(event_dict)
+def get_cached_threat_analysis(anomaly_dict, _config_mode):
+    advisor = get_advisor(get_config())
+    return advisor.analyze(anomaly_dict)
 
+config = get_config()
+scorer = get_scorer()
+
+# Initialize Asset Registry in Session State
+if "asset_registry" not in st.session_state:
+    st.session_state.asset_registry = AssetRegistry()
+
+asset_registry = st.session_state.asset_registry
 
 # ─────────────────────────────────────────────────────────
-# Data Loading
+# Data Loading Function
 # ─────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=10)
-def load_events(hours_back: int = 24) -> pd.DataFrame:
-    """Load recent OT events from log files."""
-    log_dir = "data/logs"
-
+def load_events(hours: int = 24) -> pd.DataFrame:
+    log_dir = config.log_dir
     if not os.path.exists(log_dir):
         return pd.DataFrame()
 
+    all_files = [
+        os.path.join(log_dir, f)
+        for f in os.listdir(log_dir)
+        if f.endswith(".csv")
+    ]
+    if not all_files:
+        return pd.DataFrame()
+
+    latest_files = sorted(all_files, reverse=True)[:3]
     dfs = []
-    for fname in os.listdir(log_dir):
-        if fname.endswith(".csv"):
-            path = os.path.join(log_dir, fname)
-            try:
-                df = pd.read_csv(path)
-                dfs.append(df)
-            except Exception:
-                pass
+    for f in latest_files:
+        try:
+            df_temp = pd.read_csv(f)
+            dfs.append(df_temp)
+        except Exception:
+            pass
 
     if not dfs:
         return pd.DataFrame()
 
     df = pd.concat(dfs, ignore_index=True)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["timestamp"])
-    df = df.sort_values("timestamp", ascending=True)
 
-    if df.empty:
-        return df
-
-    # Time filter: show last N hours relative to the LATEST event in the data
-    # (not datetime.now()) so lab/demo CSVs are never empty due to date mismatch
-    latest_ts = df["timestamp"].max()
-    cutoff    = latest_ts - timedelta(hours=hours_back)
-    df = df[df["timestamp"] >= cutoff]
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        cutoff = datetime.now() - timedelta(hours=hours)
+        df = df[df["timestamp"] >= cutoff]
 
     return df
 
-
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply ML scoring to events"""
     if df.empty:
         return df
-    if scorer.model is None:
-        df["anomaly_score"] = 0.0
-        df["severity"] = "UNKNOWN"
-        df["is_anomaly"] = False
-        return df
-    return scorer.score_batch(df)
 
+    scored_rows = []
+    for _, row in df.iterrows():
+        row_dict = row.to_dict()
+        event_dict = {
+            "timestamp": str(row_dict.get("timestamp", "")),
+            "src_ip": str(row_dict.get("src_ip", "0.0.0.0")),
+            "dst_ip": str(row_dict.get("dst_ip", "0.0.0.0")),
+            "protocol": str(row_dict.get("protocol", "Modbus TCP")),
+            "event_type": str(row_dict.get("event_type", "MODBUS_READ")),
+            "unit_id": row_dict.get("unit_id"),
+            "function_code": row_dict.get("function_code"),
+            "function_name": str(row_dict.get("function_name", "")),
+            "register_address": row_dict.get("register_address"),
+            "value": row_dict.get("value"),
+            "device_id": str(row_dict.get("device_id", "PLC-01")),
+            "payload_length": row_dict.get("payload_length", 0),
+            "raw_size": row_dict.get("raw_size", 64),
+            "is_write": bool(row_dict.get("is_write", False)),
+            "transaction_id": str(row_dict.get("transaction_id", "")),
+            "anomaly_injected": bool(row_dict.get("anomaly_injected", False)),
+        }
+        res = scorer.score_event(event_dict)
+        scored_rows.append(res)
+        
+        # Passively update asset registry
+        asset_registry.process_event(res)
 
-# ─────────────────────────────────────────────────────────
-# Header
-# ─────────────────────────────────────────────────────────
-
-mode_badge = (
-    '<span class="badge-live">● LIVE</span>'
-    if config.mode == "live"
-    else '<span class="badge-lab">◉ LAB</span>'
-)
-
-st.markdown(f"""
-<div class="sb-header">
-    <h1>🔐 SecureBridge OT Security Dashboard {mode_badge}</h1>
-    <p>AI-Powered Industrial Control System Monitoring |
-       PT Optima Sarana Instrument |
-       {datetime.now().strftime('%d %B %Y %H:%M')}</p>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────
-# Sidebar
-# ─────────────────────────────────────────────────────────
+    return pd.DataFrame(scored_rows)
 
 # ─────────────────────────────────────────────────────────
-# Load & Score Data
-# ─────────────────────────────────────────────────────────
-
-hours_back_default = 24
-df_raw = load_events(hours_back_default)
-df = score_events(df_raw)
-has_data = not df.empty
-
-
-# ─────────────────────────────────────────────────────────
-# Sidebar
+# Sidebar Controls
 # ─────────────────────────────────────────────────────────
 
 with st.sidebar:
-    # Styled text logo instead of external placeholder image
     st.markdown("""
-    <div style="background:linear-gradient(135deg,#1a2744,#0d4f6b);
-                padding:12px 16px;border-radius:8px;margin-bottom:12px;">
-        <span style="color:white;font-size:18px;font-weight:700;">🔐 SecureBridge</span><br>
-        <span style="color:#b2dfdb;font-size:11px;">OT Security Platform</span>
+    <div style="background:linear-gradient(135deg,#1c2541,#0b132b);
+                padding:14px 18px;border-radius:10px;border:1px solid #2a3d66;margin-bottom:15px;">
+        <span style="color:#48cae4;font-size:20px;font-weight:700;">🔐 SecureBridge</span><br>
+        <span style="color:#94a3b8;font-size:11px;">OT/ICS Security Command Center v1.5.0</span>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### ⚙️ Dashboard Settings")
+    st.markdown("### ⚙️ SOC Controls")
     hours_back = st.slider("Time window (hours)", 1, 168, 24)
     threshold = st.slider("Alert threshold", 0, 100, 60)
-    ai_enabled = st.checkbox("Enable AI Analysis", True)
+    ai_enabled = st.checkbox("Enable AI Threat Analysis", True)
     refresh = st.slider("Refresh interval (sec)", 5, 60, 10)
 
     st.divider()
-    st.markdown("### 🖥️ System Status")
-
+    st.markdown("### 🖥️ Deployment Status")
     if config.mode == "live":
-        st.success("● Live monitoring active")
+        st.markdown('<span class="badge-live">● LIVE SPAN PORT</span>', unsafe_allow_html=True)
     else:
-        st.info("◉ Lab/Demo mode")
+        st.markdown('<span class="badge-lab">◉ LAB DEMO MODE</span>', unsafe_allow_html=True)
 
     st.caption(f"Network: {config.capture.target_network}")
     st.caption(f"Threshold: {threshold}/100")
-    st.caption(f"Refresh: {refresh}s")
 
-    # LLM backend status
     st.divider()
-    st.markdown("### 🤖 LLM Backend")
-    llm_mode = config.llm.mode
-    llm_model = config.llm.ollama_model if llm_mode in ("ollama", "air-gapped") else config.llm.claude_model
-    mode_label = {
-        "auto":       "Auto (Claude→Ollama)",
-        "claude":     "Cloud (Claude API)",
-        "ollama":     "Local (Ollama)",
-        "air-gapped": "Air-Gapped (Ollama)",
-    }.get(llm_mode, llm_mode)
-    st.caption(f"Mode : {mode_label}")
-    st.caption(f"Model: {llm_model}")
+    st.markdown("### 🤖 LLM Engine")
+    st.caption(f"Mode : {config.llm.mode.upper()}")
+    st.caption(f"Model: {config.llm.gemini_model if config.llm.mode in ('auto', 'gemini') else config.llm.ollama_model}")
 
-    # Report Generation Controls (Sidebar)
+    st.divider()
     st.markdown("### 📄 Compliance Report")
-    if st.button("📄 Generate IEC 62443 Report", type="primary"):
+    if st.button("📄 Generate IEC 62443 PDF Report", type="primary"):
         with st.spinner("Generating PDF report..."):
             try:
                 from compliance.report_generator import generate_report
                 
-                # Determine live risk level dynamically
-                active_alerts = df[df["anomaly_score"] >= threshold] if has_data and "anomaly_score" in df.columns else pd.DataFrame()
+                df_temp = load_events(hours_back)
+                df_scored = score_events(df_temp)
+                active_alerts = df_scored[df_scored["anomaly_score"] >= threshold] if not df_scored.empty else pd.DataFrame()
                 has_crit = not active_alerts[active_alerts["severity"] == "CRITICAL"].empty if not active_alerts.empty else False
                 has_high = not active_alerts[active_alerts["severity"] == "HIGH"].empty if not active_alerts.empty else False
                 calc_risk = "CRITICAL" if has_crit else "HIGH" if has_high else "MEDIUM"
@@ -288,311 +268,435 @@ with st.sidebar:
                 )
                 os.makedirs(config.compliance.report_output_dir, exist_ok=True)
                 generate_report(client_data, output_path)
-
-                with open(output_path, "rb") as f:
-                    st.session_state["pdf_bytes"] = f.read()
-                    st.session_state["pdf_filename"] = os.path.basename(output_path)
+                st.session_state["generated_pdf"] = output_path
                 st.success("✅ Report generated!")
             except Exception as e:
-                st.error(f"Report generation failed: {e}")
+                st.error(f"Failed to generate report: {e}")
 
-    if "pdf_bytes" in st.session_state:
+    if "generated_pdf" in st.session_state and os.path.exists(st.session_state["generated_pdf"]):
+        with open(st.session_state["generated_pdf"], "rb") as f:
+            pdf_bytes = f.read()
         st.download_button(
             label="⬇️ Download PDF Report",
-            data=st.session_state["pdf_bytes"],
-            file_name=st.session_state["pdf_filename"],
+            data=pdf_bytes,
+            file_name=os.path.basename(st.session_state["generated_pdf"]),
             mime="application/pdf"
         )
 
-
 # ─────────────────────────────────────────────────────────
-# KPI Metrics Row
-# ─────────────────────────────────────────────────────────
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-if has_data:
-    alerts = df[df["anomaly_score"] >= threshold]
-    critical = alerts[alerts["severity"] == "CRITICAL"]
-    high = alerts[alerts["severity"] == "HIGH"]
-    devices = df["device_id"].nunique() if "device_id" in df.columns else 0
-    avg_score = df["anomaly_score"].mean()
-    writes = df[df.get("is_write", pd.Series(False)).astype(bool)] if "is_write" in df.columns else pd.DataFrame()
-else:
-    alerts = critical = high = writes = pd.DataFrame()
-    devices = avg_score = 0
-
-with col1:
-    st.metric(
-        "🚨 Active Alerts",
-        len(alerts),
-        delta="Needs attention" if len(alerts) > 0 else "All clear"
-    )
-
-with col2:
-    st.metric(
-        "🔴 Critical",
-        len(critical),
-        delta="Immediate action" if len(critical) > 0 else "None"
-    )
-
-with col3:
-    st.metric(
-        "🟠 High",
-        len(high),
-        delta="Investigate" if len(high) > 0 else "None"
-    )
-
-with col4:
-    st.metric(
-        "🔌 Devices Monitored",
-        devices,
-        delta="Active"
-    )
-
-with col5:
-    st.metric(
-        "📊 Avg Anomaly Score",
-        f"{avg_score:.1f}/100" if has_data else "N/A"
-    )
-
-st.divider()
-
-
-# ─────────────────────────────────────────────────────────
-# Main Charts
+# Main Content & Header
 # ─────────────────────────────────────────────────────────
 
-if has_data:
-    col1, col2 = st.columns([3, 2])
+df_raw = load_events(hours_back)
+df = score_events(df_raw)
+has_data = not df.empty
 
-    with col1:
-        st.subheader("📈 Anomaly Score Timeline")
-        fig = go.Figure()
-
-        # Score line
-        fig.add_trace(go.Scatter(
-            x=df["timestamp"],
-            y=df["anomaly_score"],
-            mode="lines",
-            name="Anomaly Score",
-            line=dict(color="#0d7377", width=1.5),
-            fill="tozeroy",
-            fillcolor="rgba(13, 115, 119, 0.1)"
-        ))
-
-        # Alert threshold
-        fig.add_hline(
-            y=threshold,
-            line_dash="dash",
-            line_color="#e67e22",
-            annotation_text=f"Alert Threshold ({threshold})",
-            annotation_position="top right"
-        )
-
-        # Critical threshold
-        fig.add_hline(
-            y=80,
-            line_dash="dot",
-            line_color="#c0392b",
-            annotation_text="Critical (80)",
-            annotation_position="top left"
-        )
-
-        # Mark anomaly points
-        anomaly_df = df[df["anomaly_score"] >= threshold]
-        if not anomaly_df.empty:
-            fig.add_trace(go.Scatter(
-                x=anomaly_df["timestamp"],
-                y=anomaly_df["anomaly_score"],
-                mode="markers",
-                name="Alert",
-                marker=dict(
-                    color=anomaly_df["anomaly_score"].apply(
-                        lambda s: "#c0392b" if s >= 80 else "#e67e22"
-                    ),
-                    size=8,
-                    symbol="circle"
-                )
-            ))
-
-        fig.update_layout(
-            height=300,
-            showlegend=True,
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            yaxis=dict(range=[0, 105], gridcolor="#f0f0f0"),
-            xaxis=dict(gridcolor="#f0f0f0"),
-            margin=dict(l=10, r=10, t=10, b=10)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("🎯 Alert Distribution")
-
-        if not alerts.empty:
-            severity_counts = alerts["severity"].value_counts()
-            colors_map = {
-                "CRITICAL": "#c0392b",
-                "HIGH": "#e67e22",
-                "MEDIUM": "#f39c12",
-                "LOW": "#27ae60"
-            }
-            fig2 = go.Figure(go.Pie(
-                labels=severity_counts.index,
-                values=severity_counts.values,
-                marker_colors=[
-                    colors_map.get(s, "#95a5a6")
-                    for s in severity_counts.index
-                ],
-                hole=0.4
-            ))
-            fig2.update_layout(
-                height=300,
-                showlegend=True,
-                margin=dict(l=10, r=10, t=10, b=10)
-            )
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.success("✅ No alerts in selected time window")
-
-    # Device status table
-    if "device_id" in df.columns:
-        st.subheader("🔌 Device Status")
-
-        device_summary = df.groupby("device_id").agg(
-            events=("timestamp", "count"),
-            max_score=("anomaly_score", "max"),
-            avg_score=("anomaly_score", "mean"),
-            last_seen=("timestamp", "max"),
-            writes=("is_write", "sum") if "is_write" in df.columns else ("timestamp", "count")
-        ).reset_index()
-
-        device_summary["status"] = device_summary["max_score"].apply(
-            lambda s: "🔴 ALERT" if s >= threshold else "🟢 NORMAL"
-        )
-        device_summary["avg_score"] = device_summary["avg_score"].round(1)
-        device_summary["max_score"] = device_summary["max_score"].round(1)
-
-        st.dataframe(
-            device_summary[[
-                "device_id", "status", "events",
-                "avg_score", "max_score", "last_seen"
-            ]],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    st.divider()
-
-    # ─────────────────────────────────────────────────────
-    # Active Alerts with AI Analysis
-    # ─────────────────────────────────────────────────────
-
-    st.subheader("🚨 Active Alerts")
-
-    if alerts.empty:
-        st.success("✅ No active alerts — all systems nominal")
-    else:
-        for _, row in alerts.sort_values(
-            "anomaly_score", ascending=False
-        ).head(10).iterrows():
-
-            severity = row.get("severity", "MEDIUM")
-            score = row.get("anomaly_score", 0)
-            device = row.get("device_id", "Unknown")
-            ts = row.get("timestamp", "")
-
-            css_class = {
-                "CRITICAL": "alert-critical",
-                "HIGH": "alert-high",
-                "MEDIUM": "alert-medium"
-            }.get(severity, "alert-medium")
-
-            with st.expander(
-                f"{'🔴' if severity == 'CRITICAL' else '🟠' if severity == 'HIGH' else '🔔'} "
-                f"{severity} — {device} | Score: {score:.1f}/100 | {ts}"
-            ):
-                col_a, col_b = st.columns(2)
-
-                with col_a:
-                    st.markdown("**📊 Event Details**")
-                    st.write(f"Protocol: {row.get('protocol', 'N/A')}")
-                    st.write(f"Event: {row.get('event_type', 'N/A')}")
-                    st.write(f"Source: {row.get('src_ip', 'N/A')}")
-                    st.write(f"Destination: {row.get('dst_ip', 'N/A')}")
-                    st.write(f"Function: {row.get('function_name', 'N/A')}")
-                    st.write(f"Register: {row.get('register_address', 'N/A')}")
-
-                    if row.get("is_write"):
-                        st.error("⚠️ WRITE OPERATION DETECTED")
-
-                with col_b:
-                    if ai_enabled:
-                        with st.spinner("🤖 AI analyzing threat..."):
-                            analysis = get_cached_threat_analysis(row.to_dict())
-
-                        st.markdown("**🤖 AI Threat Analysis**")
-                        st.write(f"**{analysis.get('threat_summary', 'N/A')}**")
-
-                        st.markdown("**⚡ Immediate Actions:**")
-                        for action in analysis.get("immediate_actions", [])[:3]:
-                            st.write(f"• {action}")
-
-                        iec = analysis.get("iec62443_reference", {})
-                        if iec:
-                            st.caption(
-                                f"📖 IEC 62443: {iec.get('requirement')} — "
-                                f"{iec.get('title', '')}"
-                            )
-
-                        mitre = analysis.get("mitre_attack_ics")
-                        if mitre:
-                            st.caption(f"🎯 MITRE ATT&CK ICS: {mitre}")
-
-                        if analysis.get("escalate_immediately"):
-                            st.error(
-                                f"🔺 ESCALATE: {analysis.get('escalation_reason', '')}"
-                            )
-                    else:
-                        st.info("Enable AI Analysis in sidebar for threat intelligence")
-
-else:
-    # No data state
-    st.info(
-        "📡 Waiting for OT network data...\n\n"
-        "Run the monitor to start collecting events:\n"
-        "```bash\npython core/capture/monitor.py config/lab.yaml\n```"
-    )
-
-    # Demo placeholder
-    st.markdown("### 📋 Platform Capabilities")
-    st.markdown("""
-    **SecureBridge monitors and protects:**
-    - ✅ Modbus TCP protocol (PLCs, RTUs)
-    - ✅ DNP3 (SCADA communications)
-    - ✅ OPC-UA (IT/OT bridge)
-    - ✅ S7comm (Siemens PLCs)
-
-    **AI-powered detection:**
-    - ✅ Behavioral anomaly detection (Isolation Forest ML)
-    - ✅ LLM threat analysis (Claude API)
-    - ✅ IEC 62443 compliance mapping
-    - ✅ Automated PDF reports (EN + Bahasa Indonesia)
-    """)
-
-
-# ─────────────────────────────────────────────────────────
-# Footer
-# ─────────────────────────────────────────────────────────
-
-st.divider()
-st.caption(
-    "🔐 SecureBridge OT Security Platform | "
-    "Sandy Lukita | PT Optima Sarana Instrument | "
-    "IEC 62443 | Purdue Model | Claude API + Ollama (Air-Gapped)"
+mode_badge = (
+    '<span class="badge-live">● LIVE</span>'
+    if config.mode == "live"
+    else '<span class="badge-lab">◉ LAB DEMO</span>'
 )
 
-# Auto-refresh
-time.sleep(refresh)
-st.rerun()
+st.markdown(f"""
+<div class="sb-header">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+            <h1>🔐 SecureBridge OT Command Center</h1>
+            <p>Passive ICS Security Monitoring & IEC 62443 Compliance Platform | {config.compliance.consulting_firm}</p>
+        </div>
+        <div>{mode_badge}</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────
+# Tab Navigation
+# ─────────────────────────────────────────────────────────
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Live SOC Operations",
+    "🌐 Purdue Network Topology",
+    "🎛️ SCADA / HMI Process Telemetry",
+    "📑 IEC 62443 Risk Register & Audit"
+])
+
+# ─────────────────────────────────────────────────────────
+# TAB 1: LIVE SOC OPERATIONS
+# ─────────────────────────────────────────────────────────
+
+with tab1:
+    if has_data:
+        total_events = len(df)
+        active_alerts = df[df["anomaly_score"] >= threshold]
+        crit_count = len(df[df["severity"] == "CRITICAL"])
+        high_count = len(df[df["severity"] == "HIGH"])
+        med_count = len(df[df["severity"] == "MEDIUM"])
+        devices_count = df["device_id"].nunique() if "device_id" in df.columns else 3
+        avg_score = df["anomaly_score"].mean()
+    else:
+        total_events = 0
+        active_alerts = pd.DataFrame()
+        crit_count = 0
+        high_count = 0
+        med_count = 0
+        devices_count = 3
+        avg_score = 0.0
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.markdown(f"""
+        <div class="soc-card status-crit">
+            <div class="soc-card-title">Active Alerts</div>
+            <div class="soc-card-value">{len(active_alerts)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="soc-card status-crit">
+            <div class="soc-card-title">Critical Severity</div>
+            <div class="soc-card-value">{crit_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="soc-card status-high">
+            <div class="soc-card-title">High Severity</div>
+            <div class="soc-card-value">{high_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""
+        <div class="soc-card status-ok">
+            <div class="soc-card-title">Devices Monitored</div>
+            <div class="soc-card-value">{devices_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col5:
+        st.markdown(f"""
+        <div class="soc-card status-med">
+            <div class="soc-card-title">Avg Anomaly Score</div>
+            <div class="soc-card-value">{avg_score:.1f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Charts Row
+    c1, c2 = st.columns([2, 1])
+
+    with c1:
+        st.markdown("#### 📈 Anomaly Score Timeline")
+        if has_data:
+            df_plot = df.sort_values("timestamp")
+            fig = px.line(
+                df_plot,
+                x="timestamp",
+                y="anomaly_score",
+                color="device_id",
+                color_discrete_sequence=["#00b4d8", "#00e676", "#ff9100"],
+                labels={"anomaly_score": "Score (0-100)", "timestamp": "Time"}
+            )
+            fig.add_hline(y=threshold, line_dash="dash", line_color="#ff1744", annotation_text=f"Threshold ({threshold})")
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(15,23,42,0.6)",
+                font_color="#e0e6ed",
+                margin=dict(l=20, r=20, t=30, b=20),
+                height=320
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No network event data collected yet.")
+
+    with c2:
+        st.markdown("#### 🎯 Alert Severity Distribution")
+        if has_data:
+            sev_counts = df["severity"].value_counts().reset_index()
+            sev_counts.columns = ["severity", "count"]
+            fig_pie = px.pie(
+                sev_counts,
+                values="count",
+                names="severity",
+                color="severity",
+                color_discrete_map={
+                    "CRITICAL": "#ff1744",
+                    "HIGH": "#ff9100",
+                    "MEDIUM": "#ffd600",
+                    "LOW": "#00e676"
+                },
+                hole=0.4
+            )
+            fig_pie.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e0e6ed",
+                margin=dict(l=10, r=10, t=20, b=10),
+                height=320
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    # Active Alerts List with AI Analysis & DPI Details
+    st.markdown("#### 🚨 Active Security Alerts & AI Threat Analysis")
+    if not active_alerts.empty:
+        alerts_display = active_alerts.sort_values("anomaly_score", ascending=False).head(10)
+        for _, alert in alerts_display.iterrows():
+            sev = alert.get("severity", "LOW")
+            score_val = alert.get("anomaly_score", 0.0)
+            dev_id = alert.get("device_id", "PLC-01")
+            fc_name = alert.get("function_name", "Unknown Function")
+            src_ip = alert.get("src_ip", "0.0.0.0")
+            dst_ip = alert.get("dst_ip", "0.0.0.0")
+
+            expander_title = f"🔴 [{sev}] {dev_id} | Score: {score_val:.1f}/100 | {fc_name} from {src_ip}"
+            
+            with st.expander(expander_title):
+                col_left, col_right = st.columns(2)
+                
+                with col_left:
+                    st.markdown("**📊 Wire-Level Event Details (Passive DPI)**")
+                    st.json({
+                        "Device ID": dev_id,
+                        "Protocol": alert.get("protocol"),
+                        "Event Type": alert.get("event_type"),
+                        "Function Code": alert.get("function_code"),
+                        "Function Name": fc_name,
+                        "Register Address": alert.get("register_address"),
+                        "Source IP": src_ip,
+                        "Destination IP": dst_ip,
+                        "Is Write Command": alert.get("is_write"),
+                        "Anomaly Score": f"{score_val:.1f} / 100",
+                    })
+
+                with col_right:
+                    st.markdown("**🤖 AI Threat Analysis & Playbook**")
+                    if ai_enabled:
+                        analysis = get_cached_threat_analysis(alert.to_dict(), config.llm.mode)
+                        st.markdown(f"**Threat Summary:** {analysis.get('threat_summary')}")
+                        st.markdown("**⚡ Immediate Actions:**")
+                        for act in analysis.get("immediate_actions", []):
+                            st.markdown(f"- {act}")
+                        
+                        iec_ref = analysis.get("iec62443_reference", {})
+                        st.caption(f"📖 IEC 62443: {iec_ref.get('requirement')} — {iec_ref.get('title')}")
+                        st.caption(f"🎯 MITRE ATT&CK: {analysis.get('mitre_attack_ics')}")
+
+                        # Interactive Firewall Playbook Expander
+                        with st.expander("🛡️ Preview Firewall Containment Rule"):
+                            st.code(f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
+# Block unauthorized traffic from {src_ip} to {dst_ip}
+iptables -A FORWARD -s {src_ip} -d {dst_ip} -p tcp --dport 502 -j DROP
+# Log containment action
+logger -t SECUREBRIDGE "CONTAINMENT: Blocked unauthorized Modbus FC{alert.get('function_code')} from {src_ip}"
+""", language="bash")
+    else:
+        st.success("✅ No active alerts above threshold. Network operations normal.")
+
+# ─────────────────────────────────────────────────────────
+# TAB 2: PURDUE NETWORK TOPOLOGY VISUALIZER
+# ─────────────────────────────────────────────────────────
+
+with tab2:
+    st.markdown("### 🌐 Purdue Model Network Topology Visualizer")
+    st.caption("Passive Asset Profiling & Threat Mapping — Zero IP footprint, zero active scanning.")
+
+    topo_data = asset_registry.get_topology_nodes_and_edges()
+    nodes_df = pd.DataFrame(topo_data["nodes"])
+
+    if not nodes_df.empty:
+        # Create Purdue Model 2D Network Scatter Plot
+        fig_topo = px.scatter(
+            nodes_df,
+            x="max_score",
+            y="y_rank",
+            color="status",
+            size=[35] * len(nodes_df),
+            hover_name="label",
+            hover_data=["type", "level", "max_score"],
+            color_discrete_map={"ONLINE": "#00e676", "WARNING": "#ff9100", "CRITICAL": "#ff1744"},
+            text="label"
+        )
+        fig_topo.update_traces(textposition="top center", marker=dict(line=dict(width=2, color="white")))
+        fig_topo.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(15,23,42,0.8)",
+            font_color="#e0e6ed",
+            yaxis=dict(
+                tickmode="array",
+                tickvals=[1, 2, 3, 4],
+                ticktext=["Level 1 (PLCs)", "Level 2 (SCADA/HMI)", "Level 3.5 (DMZ)", "External"],
+                title="Purdue Network Hierarchy"
+            ),
+            xaxis=dict(title="Max Anomaly Score (Threat Exposure)"),
+            height=420
+        )
+        st.plotly_chart(fig_topo, use_container_width=True)
+
+    st.markdown("#### 📋 Passively Discovered Asset Inventory")
+    assets_table = [
+        {
+            "IP Address": a.ip,
+            "Asset Name": a.name,
+            "Asset Type": a.asset_type,
+            "Purdue Level": a.purdue_level,
+            "Protocol": a.protocol,
+            "Max Anomaly Score": f"{a.max_score:.1f}",
+            "Status": a.status
+        }
+        for a in asset_registry.assets.values()
+    ]
+    st.dataframe(pd.DataFrame(assets_table), use_container_width=True)
+
+# ─────────────────────────────────────────────────────────
+# TAB 3: SCADA / HMI PROCESS TELEMETRY
+# ─────────────────────────────────────────────────────────
+
+with tab3:
+    st.markdown("### 🎛️ Live SCADA / HMI Process Telemetry")
+    st.caption("Real-time physical process state monitoring for simulated PLCs.")
+
+    # Simulated Gauge Gauges
+    c1, c2, c3 = st.columns(3)
+
+    # Simulated values dynamically generated
+    t_val = 2850 + np.random.randint(-15, 15)
+    temp_val = 74.2 + np.random.uniform(-0.5, 0.5)
+    p_val = 12.4 + np.random.uniform(-0.2, 0.2)
+
+    # Check if active write anomaly exists
+    is_anomaly_active = False
+    if has_data and not df.empty:
+        has_write = not df[(df["is_write"] == True) & (df["anomaly_score"] >= threshold)].empty
+        if has_write:
+            is_anomaly_active = True
+            p_val = 18.9  # Out of bounds pressure spike
+
+    with c1:
+        st.markdown("#### 🌀 PLC-01: Gas Turbine Speed")
+        fig_g1 = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=t_val,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "RPM"},
+            gauge={
+                'axis': {'range': [0, 3500]},
+                'bar': {'color': "#00b4d8"},
+                'steps': [
+                    {'range': [0, 2500], 'color': "#1b263b"},
+                    {'range': [2500, 3000], 'color': "#0d4f6b"},
+                    {'range': [3000, 3500], 'color': "#ff1744"}
+                ]
+            }
+        ))
+        fig_g1.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#e0e6ed", height=250, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig_g1, use_container_width=True)
+        st.caption("Status: NORMAL OPERATING SPEED")
+
+    with c2:
+        st.markdown("#### 🌡️ PLC-02: Cooling Loop Temp")
+        fig_g2 = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=temp_val,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "°C"},
+            gauge={
+                'axis': {'range': [0, 120]},
+                'bar': {'color': "#00e676"},
+                'steps': [
+                    {'range': [0, 80], 'color': "#1b263b"},
+                    {'range': [80, 100], 'color': "#ff9100"},
+                    {'range': [100, 120], 'color': "#ff1744"}
+                ]
+            }
+        ))
+        fig_g2.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#e0e6ed", height=250, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig_g2, use_container_width=True)
+        st.caption("Status: TEMPERATURE OPTIMAL")
+
+    with c3:
+        st.markdown("#### ⚡ PLC-03: Valve Line Pressure")
+        fig_g3 = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=p_val,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "BAR"},
+            gauge={
+                'axis': {'range': [0, 25]},
+                'bar': {'color': "#ff1744" if is_anomaly_active else "#00e676"},
+                'steps': [
+                    {'range': [0, 15], 'color': "#1b263b"},
+                    {'range': [15, 20], 'color': "#ff9100"},
+                    {'range': [20, 25], 'color': "#ff1744"}
+                ]
+            }
+        ))
+        fig_g3.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#e0e6ed", height=250, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig_g3, use_container_width=True)
+
+        if is_anomaly_active:
+            st.error("🚨 VALVE OVERRIDE & PRESSURE SPIKE DETECTED!")
+        else:
+            st.caption("Status: PRESSURE STABLE")
+
+# ─────────────────────────────────────────────────────────
+# TAB 4: IEC 62443-3-2 RISK REGISTER & AUDIT
+# ─────────────────────────────────────────────────────────
+
+with tab4:
+    st.markdown("### 📑 IEC 62443-3-2 Risk Register & SUC Scope")
+    st.caption("Formal System Under Consideration (SUC) boundary & RS1-RS7 risk register traceability.")
+
+    suc = SystemUnderConsideration()
+    risk_reg = generate_risk_register(FINDING_TO_IEC, suc)
+    comp_score = calculate_compliance_score(FINDING_TO_IEC)
+
+    # SUC Header Card
+    st.info(f"""
+    **System Under Consideration (SUC):** {suc.name}  
+    **Business Owner:** {suc.business_owner} | **Target Security Level:** {suc.target_sl}  
+    **In-Scope Boundary Assets:** {', '.join(suc.boundary_devices)}  
+    **Explicitly Excluded:** {', '.join(suc.excluded_systems)}
+    """)
+
+    col_r1, col_r2 = st.columns([1, 1])
+
+    with col_r1:
+        st.markdown("#### 📊 IEC 62443 Category Compliance Radar")
+        cats = list(comp_score["categories"].keys())
+        scores = [c["compliant"] / c["total"] * 100 if c["total"] > 0 else 0 for c in comp_score["categories"].values()]
+
+        fig_radar = go.Figure(data=go.Scatterpolar(
+            r=scores,
+            theta=cats,
+            fill='toself',
+            line_color="#00b4d8"
+        ))
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#e0e6ed",
+            height=300,
+            margin=dict(l=40, r=40, t=30, b=30)
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+    with col_r2:
+        st.markdown("#### 🎯 Compliance Summary")
+        st.metric("Overall Compliance Score", f"{comp_score['overall_score']}%")
+        st.metric("Security Level Achieved", comp_score["security_level"])
+        st.metric("Compliant Requirements", f"{comp_score['compliant_requirements']} / {comp_score['total_requirements']}")
+
+    st.markdown("#### 📋 Formal IEC 62443-3-2 Risk Register (RS1 - RS12)")
+    reg_df = pd.DataFrame([
+        {
+            "Risk #": r["risk_number"],
+            "Zone / Asset": f"{r['zone']} ({r['asset_description']})",
+            "Severity": r["severity"],
+            "Unmitigated Risk": r["unmitigated_risk"],
+            "Residual Risk": r["final_residual_risk"],
+            "Target SL": r["target_sl"],
+            "Countermeasures": r["countermeasures"],
+            "Status": r["status"]
+        }
+        for r in risk_reg
+    ])
+    st.dataframe(reg_df, use_container_width=True)
