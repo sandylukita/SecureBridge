@@ -482,7 +482,8 @@ with tab1:
                 with col_right:
                     st.markdown("**🤖 AI Threat Analysis & Playbook**")
                     if ai_enabled:
-                        analysis = get_cached_threat_analysis(alert.to_dict(), config.llm.mode)
+                        with st.spinner("🤖 AI sedang menganalisis ancaman..."):
+                            analysis = get_cached_threat_analysis(alert.to_dict(), config.llm.mode)
                         st.markdown(f"**Threat Summary:** {analysis.get('threat_summary')}")
                         st.markdown("**⚡ Immediate Actions:**")
                         for act in analysis.get("immediate_actions", []):
