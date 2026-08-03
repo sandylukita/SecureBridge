@@ -312,15 +312,14 @@ def train_model(
 
 def normalize_scores(raw_scores: np.ndarray) -> np.ndarray:
     """
-    Convert Isolation Forest scores to 0-100 scale.
+    Convert Isolation Forest decision function scores to 0-100 scale.
     Higher = more anomalous.
-    IF returns negative scores for anomalies (more negative = more anomalous).
+    Isolation Forest score_samples returns ~0.15 for normal data,
+    and -0.1 to -0.6 for anomalies.
     """
-    min_s = raw_scores.min()
-    max_s = raw_scores.max()
-    if max_s == min_s:
-        return np.zeros_like(raw_scores)
-    normalized = (raw_scores - max_s) / (min_s - max_s) * 100
+    raw_scores = np.asarray(raw_scores, dtype=float)
+    # Absolute mapping: 0.2 -> 0 (normal), 0.0 -> 40 (medium), -0.2 -> 70 (high), -0.4 -> 90+ (critical)
+    normalized = (0.2 - raw_scores) / 0.7 * 100
     return np.clip(normalized, 0, 100)
 
 
@@ -492,10 +491,19 @@ class AnomalyScorer:
             raw_score        = self.model.score_samples(features_scaled)[0]
             anomaly_score    = float(normalize_scores(np.array([raw_score]))[0])
             is_anomaly       = self.model.predict(features_scaled)[0] == -1
-            severity         = classify_severity(anomaly_score)
 
-            # Build human-readable flags for dashboard / alert context
             feat_row = current_features.iloc[0]
+            fc_risk = feat_row.get("function_code_risk", 0)
+            is_write_flag = feat_row.get("is_write", 0)
+            is_unknown_ip = feat_row.get("is_unknown_src_ip", 0)
+
+            # Domain-specific OT risk floor: Writes, Rogue IPs, and High Risk FCs always elevate score
+            if fc_risk >= 7 or is_write_flag == 1 or is_unknown_ip == 1 or event_dict.get("anomaly_injected"):
+                risk_floor = float(fc_risk * 10) if fc_risk >= 7 else 75.0
+                anomaly_score = max(anomaly_score, risk_floor)
+                is_anomaly = True
+
+            severity = classify_severity(anomaly_score)
             flags    = self._build_flags(feat_row, event_dict)
 
             res = dict(event_dict)

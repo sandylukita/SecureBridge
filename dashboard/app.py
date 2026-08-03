@@ -172,19 +172,27 @@ def load_events(hours: int = 24) -> pd.DataFrame:
         cutoff = datetime.now() - timedelta(hours=hours)
         df_filtered = df[df["timestamp"] >= cutoff]
         if not df_filtered.empty:
-            return df_filtered.tail(150)
+            df = df_filtered
 
-    # Fallback: if cutoff returns empty, return the most recent 150 events for instant rendering!
-    return df.tail(150)
+    # Smart sampling: Always preserve anomaly events + latest normal events (max 250 rows)
+    anomaly_events = df[
+        (df.get("anomaly_injected") == True) |
+        (df.get("is_write") == True) |
+        (df.get("function_code").isin([5, 6, 15, 16, 43])) |
+        (df.get("src_ip") == "192.168.10.199")
+    ]
+    recent_events = df.tail(150)
+    
+    combined = pd.concat([anomaly_events, recent_events], ignore_index=False)
+    combined = combined.drop_duplicates().sort_values("timestamp").tail(250)
+
+    return combined
 
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Limit to 150 events max for instant sub-second ML scoring
-    if len(df) > 150:
-        df = df.tail(150)
-
+    local_scorer = AnomalyScorer("data/models/ot_model.pkl")
     scored_rows = []
     for _, row in df.iterrows():
         row_dict = row.to_dict()
@@ -206,7 +214,7 @@ def score_events(df: pd.DataFrame) -> pd.DataFrame:
             "transaction_id": str(row_dict.get("transaction_id", "")),
             "anomaly_injected": bool(row_dict.get("anomaly_injected", False)),
         }
-        res = scorer.score_event(event_dict)
+        res = local_scorer.score_event(event_dict)
         scored_rows.append(res)
         
         # Passively update asset registry
