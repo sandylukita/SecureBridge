@@ -1,8 +1,8 @@
 # 📖 SecureBridge — Panduan Pengguna Lengkap (End-to-End User Manual)
 
-Dokumen Version: 1.0  
+Dokumen Version: 1.5.0  
 Penulis: Sandy Lukita | PT Optima Sarana Instrument  
-Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Penggunaan Dashboard SOC, hingga Pembuatan Laporan PDF Audit IEC 62443.
+Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Passive Asset Discovery, Penggunaan Cyber SOC Dashboard (4 Tab Interaktif), hingga Pembuatan Laporan PDF Audit IEC 62443 (RS1-RS12).
 
 ---
 
@@ -12,10 +12,10 @@ Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasi
 2. [Instalasi & Setup Lingkungan](#2-instalasi--setup-lingkungan)
 3. [Konfigurasi Mode Operasional (`lab.yaml` vs `live.yaml`)](#3-konfigurasi-mode-operasional)
 4. [Menjalankan Monitoring Pasif & Simulator Traffic](#4-menjalankan-monitoring-pasif--simulator-traffic)
-5. [Panduan Penggunaan Streamlit SOC Dashboard](#5-panduan-penggunaan-streamlit-soc-dashboard)
-6. [Membaca & Memahami AI Threat Analysis (Gemini / Ollama / Claude)](#6-membaca--memahami-ai-threat-analysis)
-7. [Membuat Laporan PDF Audit Kepatuhan IEC 62443](#7-membuat-laporan-pdf-audit-kepatuhan-iec-62443)
-8. [ Troubleshooting & Solusi Masalah Umum](#8-troubleshooting--solusi-masalah-umum)
+5. [Panduan Penggunaan Cyber SOC Command Center (4 Tab Interaktif)](#5-panduan-penggunaan-cyber-soc-command-center)
+6. [Membaca & Memahami AI Threat Analysis & Containment Playbook](#6-membaca--memahami-ai-threat-analysis--containment-playbook)
+7. [Membuat Laporan PDF Audit Kepatuhan IEC 62443 & SUC Scope](#7-membuat-laporan-pdf-audit-kepatuhan-iec-62443--suc-scope)
+8. [Troubleshooting & Solusi Masalah Umum](#8-troubleshooting--solusi-masalah-umum)
 
 ---
 
@@ -30,9 +30,10 @@ Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasi
 
 ### 🤖 Kebutuhan LLM (Pilih Salah Satu Sesuai Kebutuhan)
 1. **Opsi A — Showcase / Lab Demo (Gratis & Kilat)**:
-   - Google Gemini API Key dari [Google AI Studio](https://aistudio.google.com/app/apikey).
+   - Google Gemini API Key dari [Google AI Studio](https://aistudio.google.com/app/apikey) (`GEMINI_API_KEY`).
 2. **Opsi B — Produksi Klien 100% Air-Gapped (On-Premise)**:
    - [Ollama](https://ollama.com/) terinstall di server lokal + Model `llama3.1` (`ollama pull llama3.1`).
+   - Panduan transfer offline USB & retrain ML 30-hari: Lihat [`AIR-GAPPED-MAINTENANCE.md`](AIR-GAPPED-MAINTENANCE.md).
 3. **Opsi C — Cloud High-End**:
    - Anthropic Claude API Key (`ANTHROPIC_API_KEY`).
 
@@ -92,7 +93,7 @@ mode: lab
 simulator:
   enabled: true
   plc_count: 3               # Simulasi 3 PLC Modbus (PLC-01, PLC-02, PLC-03)
-  polling_interval: 5             # Interval pengiriman data (detik)
+  polling_interval: 5        # Interval pengiriman data (detik)
 llm:
   mode: auto                 # Auto memilih Gemini API -> Claude -> Ollama -> Rule-based
   gemini_model: gemini-flash-latest
@@ -118,21 +119,24 @@ llm:
 
 ## 4. MENJALANKAN MONITORING PASIF & SIMULATOR TRAFFIC
 
-### Mode 1: Menjalankan Simulator Lab (Pengujian / Demo)
+### Mode 1: Menjalankan Simulator Lab & Injeksi Anomali (Demo)
 
-Jika Anda ingin mensimulasikan traffic OT dan mengumpulkan event log baru:
+Jika Anda ingin mensimulasikan traffic OT dan menguji pemicuan alert anomali:
 
 ```bash
+# 1. Jalankan traffic simulator di background
 python core/capture/monitor.py config/lab.yaml
+
+# 2. Injeksi anomali serangan (unauthorized write & network scan)
+python inject_demo.py
 ```
-> *Engine simulator akan mengirimkan traffic Modbus ke 3 PLC fiktif dan mencatat event secara otomatis ke `data/logs/ot_events_YYYYMMDD.csv`.*
 
 ### Mode 2: Melatih / Update Model ML (Isolation Forest)
 
-Jika Anda ingin melatih ulang model Machine Learning pada dataset log terbaru:
+Untuk melatih ulang model Machine Learning Isolation Forest pada dataset log terbaru:
 
 ```bash
-python core/detection/model.py train data/logs/ot_events_20260731.csv
+python core/detection/model.py train data/logs/ot_events_YYYYMMDD.csv
 ```
 > *Model yang dilatih akan disimpan ke `data/models/ot_model.pkl`.*
 
@@ -140,7 +144,7 @@ python core/detection/model.py train data/logs/ot_events_20260731.csv
 
 *(Membutuhkan akses Administrator/Root)*:
 
-* **Windows (Buka PowerShell as Administrator)**:
+* **Windows (PowerShell as Administrator)**:
   ```powershell
   python core/capture/monitor.py config/live.yaml
   ```
@@ -149,44 +153,21 @@ python core/detection/model.py train data/logs/ot_events_20260731.csv
   sudo ./venv/bin/python core/capture/monitor.py config/live.yaml
   ```
 
----
-
-### Mode 4: Menjalankan Menggunakan Docker & Docker Compose (Containerized)
-
-Jika Anda ingin menjalankan seluruh ekosistem SecureBridge (Simulator + Dashboard + Ollama Local) di dalam kontainer terisolasi:
-
-#### 1. Jalankan Mode Lab / Demo (Menggunakan Gemini / Cloud API)
+### Mode 4: Menjalankan Menggunakan Docker Compose (Containerized)
 
 ```bash
+# Mode Demo / Lab (Cloud API)
 docker compose up -d
-```
-> *Menjalankan Dashboard SOC, Simulator Traffic, dan Model Trainer di dalam kontainer Docker terisolasi (`it_zone`, `dmz_zone`, `ot_zone`).*
 
-#### 2. Jalankan Mode Air-Gapped (Termasuk Container Local Ollama)
-
-```bash
+# Mode Air-Gapped (Termasuk Local Ollama Container)
 docker compose --profile airgapped up -d
 ```
-> *Secara otomatis menjalankan container Ollama (`securebridge-ollama`) dan men-download model `llama3.1` di dalam jaringan terisolasi.*
-
-#### 3. Perintah Pengelolaan Container
-
-```bash
-# Cek status semua container yang berjalan
-docker compose ps
-
-# Lihat log real-time dari Dashboard SOC
-docker compose logs -f dashboard
-
-# Menghentikan semua container
-docker compose down
-```
 
 ---
 
-## 5. PANDUAN PENGGUNAAN STREAMLIT SOC DASHBOARD
+## 5. PANDUAN PENGGUNAAN CYBER SOC COMMAND CENTER (4 TAB INTERAKTIF)
 
-Untuk membuka antarmuka visual SOC Dashboard:
+Untuk membuka antarmuka visual SOC Command Center:
 
 ```bash
 streamlit run dashboard/app.py
@@ -196,101 +177,87 @@ Buka peramban (browser) di alamat: **`http://localhost:8501`**
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ 🔐 SecureBridge OT Security Dashboard  [◉ LAB]                                         │
+│ 🔐 SecureBridge OT Security Command Center v1.5.0                      [◉ LAB DEMO]    │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 🚨 Active Alerts: 645   🔴 Critical: 12   🟠 High: 45   🔌 Devices: 3   📊 Avg Score: 37  │
+│ [📊 Live SOC Operations] [🌐 Purdue Network Topology] [🎛️ SCADA Telemetry] [📑 IEC 62443]│
 ├────────────────────────────────────────────────────────────────────────────────────────┤
-│ [📈 Timeline Chart: Anomaly Score]               [🎯 Alert Severity Pie Chart]          │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 🔌 Device Status Table (PLC-01, PLC-02, PLC-03)                                        │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 🚨 Active Alerts & AI Threat Analysis (Expander View)                                   │
+│ 🚨 Active Alerts: 21   🔴 Critical: 1   🟠 High: 20   🔌 Devices: 3   📊 Avg Score: 78   │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Navigasi & Fitur Utama Dashboard:
+Dashboard v1.5.0 dilengkapi dengan **4 Tab Interaktif Utama**:
 
-1. **Header Badge**: Menampilkan status mode aktif (`◉ LAB` atau `● LIVE`), waktu lokal, dan identitas perusahaan.
-2. **Kartu Metric KPI (Baris Atas)**:
-   - **Active Alerts**: Jumlah total event yang melebihi alert threshold (default >= 60).
-   - **Critical / High**: Jumlah anomali dengan severitas kritis dan tinggi.
-   - **Devices Monitored**: Jumlah perangkat PLC/RTU aktif yang terpantau.
-   - **Avg Anomaly Score**: Rata-rata skor deviasi jaringan.
-3. **Grafik Timeline Anomali**: Menampilkan fluktuasi skor anomali terhadap waktu. Garis putus-putus oranye menunjukkan batas threshold peringatan.
-4. **Grafik Distribusi Alert**: Pie chart perbandingan severitas (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
-5. **Tabel Device Status**: Ringkasan kesehatan per PLC, jumlah event, skor rata-rata, skor maksimum, dan timestamp *last seen*.
-6. **Sidebar Kontrol (Sebelah Kiri)**:
-   - Slider **Time window (hours)**: Mengatur rentang waktu tampilan data (1 - 168 jam).
-   - Slider **Alert threshold**: Mengatur ambang batas skor pemicu alert.
-   - Checkbox **Enable AI Analysis**: Mengaktifkan/menonaktifkan analisis AI otomatis.
-   - **LLM Backend Info**: Menampilkan mode AI yang sedang aktif (`Auto`, `Gemini`, `Ollama`, atau `Claude`).
-   - Tombol **`📄 Generate IEC 62443 Report`**: Memicu pembuatan laporan audit PDF.
+### 📊 Tab 1: Live SOC Operations
+- **Metric Cards KPI**: Menampilkan `Active Alerts`, `Critical Severity`, `High Severity`, `Devices Monitored`, dan `Avg Anomaly Score`.
+- **Anomaly Score Timeline**: Grafik garis real-time fluktuasi skor deviasi jaringan.
+- **Alert Severity Distribution**: Grafik pie perbandingan severitas (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
+- **Expander Alert & DPI Details**: Detail paket deep packet inspection (DPI) + analisis ancaman AI.
+- **Firewall Playbook Generator**: Tombol `🛡️ Preview Firewall Containment Rule` untuk men-generate perintah `iptables` isolasi IP penyerang.
+
+### 🌐 Tab 2: Purdue Network Topology Visualizer
+- **Passive Asset Profiling**: Memetakan perangkat secara pasif tanpa active scanning (0% dampak pada PLC).
+- **2D Purdue Model Hierarchy Scatter Graph**: Memvisualisasikan perangkat pada Purdue Layer 1 (PLCs), Layer 2 (SCADA/HMI), dan Layer 3.5 (Industrial DMZ).
+- **Attacked Node Highlighting**: Perangkat penyerang menyala **ORANGE TERBAKAR**, PLC target menyala **MERAH BERKEDIP**.
+- **Asset Inventory Table**: Tabel inventaris IP address, Asset Name, Asset Type, Purdue Level, dan status ancaman.
+
+### 🎛️ Tab 3: SCADA / HMI Process Telemetry
+- **Live Physical Gauges**: Meteran visual kondisi fisik pabrik:
+  - **PLC-01**: Gas Turbine Speed (RPM).
+  - **PLC-02**: Cooling Loop Temperature (°C).
+  - **PLC-03**: Valve Line Pressure (BAR).
+- **Process Overrides Alarm**: Banner peringatan **`🚨 VALVE OVERRIDE & PRESSURE SPIKE DETECTED!`** muncul saat terjadi perintah write ilegal di Modbus.
+
+### 📑 Tab 4: IEC 62443 Risk Register & Audit Scope
+- **SUC Scope Card**: Definisi batas-batas System Under Consideration (In-Scope Boundary Assets vs Explicitly Excluded).
+- **Compliance Radar Chart**: Persentase kepatuhan terhadap 7 kategori dasar IEC 62443.
+- **Formal Risk Register Table**: Tabel penomoran risiko `RS1` hingga `RS12` dengan skor *Unmitigated Risk* dan *Residual Risk*.
 
 ---
 
-## 6. MEMBACA & MEMAHAMI AI THREAT ANALYSIS
+## 6. MEMBACA & MEMAHAMI AI THREAT ANALYSIS & CONTAINMENT PLAYBOOK
 
-Saat Anda menglik salah satu alert di tabel **🚨 Active Alerts**, expander akan terbuka menampilkan dua kolom:
+Saat membuka expander alert di **Tab 1: Live SOC Operations**:
 
 ### Kolom Kiri — 📊 Event Details (Raw Network DPI)
-- **Protocol**: Protocol OT yang terdeteksi (misal: `Modbus TCP`).
-- **Event**: Jenis instruksi (misal: `MODBUS_WRITE` atau `MODBUS_READ`).
-- **Source IP & Destination IP**: IP pengirim dan IP tujuan PLC.
-- **Function**: Nama Function Code (misal: `Write Single Register` atau `Read Holding Registers`).
-- **Register**: Alamat memory register PLC yang diakses.
-- **Write Indicator**: Peringatan merah jika terdapat perintah modifikasi data (`WRITE OPERATION DETECTED`).
+- **Protocol & Function Code**: Memperlihatkan instruksi spesifik (misal: `Modbus FC06 Write Single Register`).
+- **Source & Destination IP**: Mengidentifikasi IP asal dan IP PLC tujuan.
+- **Memory Address & Value**: Memperlihatkan register yang dimodifikasi (misal: `Address 40001 = 9999`).
 
-### Kolom Kanan — 🤖 AI Threat Analysis
-AI secara otomatis menerjemahkan deviasi statistik menjadi narasi keamanan industri:
-1. **Threat Summary**: Penjelasan 1 kalimat dalam bahasa manusia mengenai apa yang terjadi.
-2. **⚡ Immediate Actions**: 3 langkah penanganan darurat yang aman untuk operasional pabrik (prioritas ketersediaan proses fisik).
-3. **📖 IEC 62443 Reference**: Pemetaan ke klausul persyaratan keselamatan industri (misal: `SR 2.1 Authorization Enforcement`, `SR 5.2 Zone Boundary Protection`).
-4. **🎯 MITRE ATT&CK ICS Tag**: Teknik taktik serangan OT (misal: `T0836 Modify Parameter`, `T0846 Remote System Discovery`).
-5. **Escalation Warning**: Peringatan merah jika anomali membutuhkan intervensi manusia segera.
+### Kolom Kanan — 🤖 AI Threat Analysis & Containment
+1. **Threat Summary**: Ringkasan ancaman dalam bahasa manusia yang mudah dipahami.
+2. **⚡ Immediate Actions**: Langkah penanganan darurat yang aman bagi operasi pabrik.
+3. **📖 IEC 62443 Reference**: Pemetaan ke persyaratan standar keselamatan industri.
+4. **🛡️ Preview Firewall Containment Rule**: Meng-generate perintah CLI otomatis untuk mengisolasi penyerang:
+   ```bash
+   iptables -A FORWARD -s 192.168.10.199 -d 192.168.40.10 -p tcp --dport 502 -j DROP
+   ```
 
 ---
 
-## 7. MEMBUAT LAPORAN PDF AUDIT KEPATUHAN IEC 62443
+## 7. MEMBUAT LAPORAN PDF AUDIT KEPATUHAN IEC 62443 & SUC SCOPE
 
- SecureBridge menyediakan fitur **One-Click Executive PDF Audit Report** yang dirancang khusus untuk memenuhi standar audit ISO/IEC 62443 dan laporan manajemen C-Level:
+ SecureBridge menyediakan fitur **One-Click Executive PDF Audit Report** yang memuat analisis teknis, SUC scope, dan Risk Register formal:
 
 ### Langkah Pembuatan Laporan:
 
-1. Di peramban dashboard, lihat **Sidebar Sebelah Kiri** di bagian **`📄 Compliance Report`**.
-2. Klik tombol merah **`📄 Generate IEC 62443 Report`**.
+1. Di peramban dashboard, lihat **Sidebar Sebelah Kiri** di bagian paling atas di seksi **`📄 Quick Actions`**.
+2. Klik tombol merah **`📄 Generate IEC 62443 PDF Report`**.
 3. Tunggu 2-3 detik hingga muncul notifikasi **`✅ Report generated!`**.
 4. Tombol biru **`⬇️ Download PDF Report`** akan muncul secara otomatis di bawahnya.
-5. Klik tombol tersebut untuk mengunduh file PDF (contoh nama file: `securebridge_report_20260801_1530.pdf`).
-
-### Isi File Laporan PDF yang Dihasilkan:
-- **Cover Page Executive**: Memuat nama klien, nama konsultan (*Sandy Lukita*), nama perusahaan (*PT Optima Sarana Instrument*), scope jaringan, dan tingkat risiko keseluruhan.
-- **Executive Summary Scorecard**: Skor persentase kepatuhan IEC 62443 & Security Level.
-- **Technical Security Findings**: Detail teknis temuan anomali jaringan.
-- **Compliance Mapping Matrix**: Pemetaan ke System Requirements (SR 1.1, SR 2.1, SR 3.1, SR 4.5, SR 5.1, SR 6.2).
-- **Remediation Roadmap 3-Fase**: 
-  - *Fase 1 (Immediate / 0-30 Hari)*: Tindakan darurat.
-  - *Fase 2 (Short-term / 30-90 Hari)*: Perbaikan segmentasi Purdue Model.
-  - *Fase 3 (Medium-term / 90-180 Hari)*: Peningkatan prosedur pemantauan berkelanjutan.
-- **Ringkasan Eksekutif (Bahasa Indonesia)**: Ringkasan khusus untuk jajaran Direksi & Manajemen Pabrik.
+5. Klik tombol tersebut untuk mengunduh file PDF (contoh nama file: `securebridge_report_20260803_1530.pdf`).
 
 ---
 
 ## 8. TROUBLESHOOTING & SOLUSI MASALAH UMUM
 
-### ❓ Masalah 1: `Pyshark / TShark Exception: TShark not found`
+### ❓ Masalah 1: Graph atau data alert terlihat kosong (0 Active Alerts)
+- **Penyebab**: Traffic simulator belum berjalan atau file log CSV hanya berisi polling read normal.
+- **Solusi**: Jalankan `python inject_demo.py` di terminal untuk menyuntikkan anomali serangan secara otomatis.
+
+### ❓ Masalah 2: `Pyshark / TShark Exception: TShark not found`
 - **Penyebab**: TShark belum terinstall atau jalurnya belum masuk ke Environment PATH.
-- **Solusi**: 
-  - *Windows*: Install Wireshark. Pastikan `C:\Program Files\Wireshark` ada di System PATH.
-  - *Linux*: Jalankan `sudo apt install -y tshark`.
+- **Solusi**: Install Wireshark di Windows (pastikan `C:\Program Files\Wireshark` ada di PATH) atau `sudo apt install -y tshark` di Linux.
 
-### ❓ Masalah 2: Live Monitoring gagal membaca interface di Windows
+### ❓ Masalah 3: Live Monitoring gagal membaca interface di Windows
 - **Penyebab**: Membutuhkan hak akses Administrator untuk sniffing raw socket / Npcap.
-- **Solusi**: Klik kanan PowerShell -> **Run as Administrator**, baru jalankan script monitor.
-
-### ❓ Masalah 3: Gemini API Error `429 Quota Exceeded` atau `404 Model Not Found`
-- **Penyebab**: Model name yang diset di YAML tidak cocok atau kuota API tercapai.
-- **Solusi**: Di `config/lab.yaml`, pastikan `gemini_model: gemini-flash-latest` atau ubah `mode: auto`.
-
-### ❓ Masalah 4: Laporan PDF tidak muncul saat diklik
-- **Penyebab**: Folder output belum terbuat atau masalah izin file.
-- **Solusi**: Aplikasi secara otomatis membuat folder `data/reports/`. Jika masih berkendala, pastikan folder `data/reports/` memiliki izin tulis (write permission).
+- **Solusi**: Klik kanan PowerShell -> **Run as Administrator**, lalu jalankan script monitor.
