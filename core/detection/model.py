@@ -498,25 +498,29 @@ class AnomalyScorer:
             feat_row = current_features.iloc[0]
             flags    = self._build_flags(feat_row, event_dict)
 
-            return {
+            res = dict(event_dict)
+            res.update({
                 "anomaly_score": round(anomaly_score, 1),
                 "severity":      severity,
                 "is_anomaly":    bool(is_anomaly),
                 "features":      feat_row.to_dict(),
                 "flags":         flags,
                 "error":         None,
-            }
+            })
+            return res
 
         except Exception as exc:
             logger.error(f"Scoring error: {exc}")
-            return {
+            res = dict(event_dict)
+            res.update({
                 "anomaly_score": 0,
                 "severity":      "ERROR",
                 "is_anomaly":    False,
                 "features":      {},
                 "flags":         {},
                 "error":         str(exc),
-            }
+            })
+            return res
 
     def _build_flags(self, feat_row: pd.Series, event_dict: dict) -> dict:
         """

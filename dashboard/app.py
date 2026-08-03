@@ -297,7 +297,7 @@ with st.sidebar:
 
 df_raw = load_events(hours_back)
 df = score_events(df_raw)
-has_data = not df.empty
+has_data = not df.empty and "timestamp" in df.columns
 
 mode_badge = (
     '<span class="badge-live">● LIVE</span>'
