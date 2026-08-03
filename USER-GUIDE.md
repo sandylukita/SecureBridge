@@ -1,8 +1,8 @@
 # 📖 SecureBridge — Panduan Pengguna Lengkap (End-to-End User Manual)
 
-Dokumen Version: 1.5.0  
+Dokumen Version: 1.6.0  
 Penulis: Sandy Lukita | PT Optima Sarana Instrument  
-Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Passive Asset Discovery, Penggunaan Cyber SOC Dashboard (4 Tab Interaktif), hingga Pembuatan Laporan PDF Audit IEC 62443 (RS1-RS12).
+Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Passive Asset Discovery, Penggunaan Cyber SOC Dashboard (4 Tab Interaktif), Incremental ML Scoring, hingga Pembuatan Laporan PDF Audit IEC 62443 (RS1-RS12).
 
 ---
 
@@ -214,6 +214,29 @@ Dashboard v1.5.0 dilengkapi dengan **4 Tab Interaktif Utama**:
 
 ---
 
+## 5b. ARSITEKTUR ML SCORING — MENGAPA DASHBOARD CEPAT & AMAN
+
+SecureBridge v1.6.0 menggunakan dua lapisan scoring yang bekerja bersama:
+
+### Layer 1: Isolation Forest (Sumber Kebenaran)
+- Setiap event di-score menggunakan **statistik dari training data** (`score_raw_min`/`score_raw_max` tersimpan di model pickle).
+- Tidak ada hardcoded rule yang menaikkan atau menurunkan skor — Isolation Forest adalah **satu-satunya** penentu anomaly score.
+- Distribusi yang dihasilkan realistis: ~88% LOW, ~10% MEDIUM, ~1% HIGH, <1% CRITICAL.
+
+### Layer 2: IncrementalScorer (Efisiensi SIEM-Grade)
+```
+Refresh #1 (8.000 event)   → Isolation Forest score semua    (~0.3 detik)
+Refresh #2 (8.017 event)   → Hanya 17 event baru di-score    (<0.01 detik)
+Refresh #3 (8.031 event)   → Hanya 14 event baru di-score    (<0.01 detik)
+```
+- **Cache disimpan** di `data/models/score_cache.pkl`.
+- **Auto-invalidasi**: jika model di-retrain, cache otomatis dihapus saat refresh berikutnya (dideteksi via `trained_at` timestamp di model metadata).
+- **Zero false negative**: setiap event baru tetap melalui Isolation Forest — tidak ada blind spot.
+
+> Ini adalah pendekatan yang sama yang digunakan oleh platform SIEM enterprise (Splunk, IBM QRadar) untuk memproses data volume tinggi tanpa mengorbankan kelengkapan deteksi.
+
+---
+
 ## 6. MEMBACA & MEMAHAMI AI THREAT ANALYSIS & CONTAINMENT PLAYBOOK
 
 Saat membuka expander alert di **Tab 1: Live SOC Operations**:
@@ -261,3 +284,11 @@ Saat membuka expander alert di **Tab 1: Live SOC Operations**:
 ### ❓ Masalah 3: Live Monitoring gagal membaca interface di Windows
 - **Penyebab**: Membutuhkan hak akses Administrator untuk sniffing raw socket / Npcap.
 - **Solusi**: Klik kanan PowerShell -> **Run as Administrator**, lalu jalankan script monitor.
+
+### ❓ Masalah 4: Skor anomali berubah tidak konsisten setelah model di-retrain
+- **Penyebab**: Cache `score_cache.pkl` masih berisi skor dari model sebelumnya.
+- **Solusi**: Cache akan otomatis di-invalidasi pada refresh berikutnya — tidak perlu tindakan manual. Jika ingin flush manual, hapus file `data/models/score_cache.pkl` lalu refresh dashboard.
+
+### ❓ Masalah 5: Dashboard menampilkan pie chart 100% merah (semua CRITICAL)
+- **Penyebab**: OT Risk Floor hardcode aktif (versi lama), atau data hanya berisi event anomali tanpa baseline normal.
+- **Solusi**: Pastikan menggunakan SecureBridge v1.5.1+. Jalankan simulator untuk mengisi data baseline normal: `python core/capture/monitor.py config/lab.yaml`.

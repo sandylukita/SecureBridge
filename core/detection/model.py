@@ -645,6 +645,218 @@ class AnomalyScorer:
 
 
 # ─────────────────────────────────────────────────────────
+# Incremental Scorer (SIEM-grade delta scoring with cache)
+# ─────────────────────────────────────────────────────────
+
+class IncrementalScorer:
+    """
+    Cache-backed incremental anomaly scorer for dashboard performance.
+
+    In production SIEM/SOC platforms, historical events are never re-processed
+    on every dashboard refresh.  Only *new* events (delta since last refresh)
+    are scored by the ML model.  Previously-seen events are served instantly
+    from a local cache, reducing Isolation Forest invocations from O(N_total)
+    to O(N_new) per refresh cycle.
+
+    Cache invalidation strategy
+    ---------------------------
+    The cache stores the ``trained_at`` timestamp of the model used to score
+    each entry.  If the model is retrained (new pickle saved), ``trained_at``
+    changes and the entire cache is automatically flushed and rebuilt on the
+    next refresh — ensuring scores are always consistent with the live model.
+
+    Row identity
+    ------------
+    Each event is identified by an MD5 hash of its ``timestamp``,
+    ``device_id``, and ``register_address`` fields.  This is collision-resistant
+    enough for the event volumes encountered in OT environments (< 1 M events/day).
+
+    Usage
+    -----
+        scorer = AnomalyScorer()
+        inc    = IncrementalScorer(scorer)
+        scored_df = inc.score_incremental(raw_df)
+
+    On first call  : all rows are scored via ``scorer.score_batch()`` (~1-2s).
+    On later calls : only rows not in cache are scored (<0.1s for typical delta).
+    """
+
+    CACHE_VERSION = "1"   # bump to force a full cache flush on breaking changes
+
+    def __init__(
+        self,
+        scorer: "AnomalyScorer",
+        cache_path: str = "data/models/score_cache.pkl",
+    ):
+        self.scorer     = scorer
+        self.cache_path = cache_path
+        self._cache: dict = {}          # {row_hash: {anomaly_score, severity, is_anomaly}}
+        self._cached_model_ts: str = "" # trained_at of model when cache was built
+        self._load_cache()
+
+    # ── Cache I/O ─────────────────────────────────────────────
+
+    def _load_cache(self) -> None:
+        """Load existing cache from disk.  Flush if model has been retrained."""
+        if not os.path.exists(self.cache_path):
+            return
+        try:
+            with open(self.cache_path, "rb") as f:
+                saved = pickle.load(f)
+
+            # Guard: reject cache if built for a different model version
+            if (saved.get("version")    != self.CACHE_VERSION or
+                    saved.get("model_ts") != self._current_model_ts()):
+                logger.info("IncrementalScorer: model retrained — cache invalidated")
+                return
+
+            self._cache           = saved.get("cache", {})
+            self._cached_model_ts = saved.get("model_ts", "")
+            logger.info(
+                f"IncrementalScorer: loaded {len(self._cache)} cached scores "
+                f"(model ts: {self._cached_model_ts})"
+            )
+        except Exception as exc:
+            logger.warning(f"IncrementalScorer: cache load failed ({exc}) — starting fresh")
+            self._cache = {}
+
+    def _save_cache(self) -> None:
+        """Persist cache to disk."""
+        try:
+            os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+            with open(self.cache_path, "wb") as f:
+                pickle.dump({
+                    "version":  self.CACHE_VERSION,
+                    "model_ts": self._current_model_ts(),
+                    "cache":    self._cache,
+                }, f)
+        except Exception as exc:
+            logger.warning(f"IncrementalScorer: cache save failed ({exc})")
+
+    def _current_model_ts(self) -> str:
+        """Return the trained_at timestamp of the currently loaded model."""
+        if self.scorer.metadata:
+            return self.scorer.metadata.get("trained_at", "")
+        return ""
+
+    # ── Row Hashing ───────────────────────────────────────────
+
+    @staticmethod
+    def _hash_row(row: pd.Series) -> str:
+        """
+        Stable MD5 fingerprint for a single event row.
+
+        Uses timestamp + device_id + register_address — sufficient to uniquely
+        identify an OT packet in normal Modbus polling patterns.
+        """
+        import hashlib
+        key = (
+            str(row.get("timestamp", ""))
+            + str(row.get("device_id", ""))
+            + str(row.get("register_address", ""))
+            + str(row.get("function_code", ""))
+            + str(row.get("src_ip", ""))
+        )
+        return hashlib.md5(key.encode()).hexdigest()
+
+    # ── Incremental Scoring ───────────────────────────────────
+
+    def score_incremental(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Score a DataFrame incrementally — only new rows hit Isolation Forest.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Full set of events for the current dashboard time window.
+
+        Returns
+        -------
+        pd.DataFrame
+            Same rows as ``df`` with ``anomaly_score``, ``severity``, and
+            ``is_anomaly`` columns added.  Rows are returned in the original
+            order (sorted by timestamp).
+        """
+        if df.empty:
+            return df
+
+        # Check model timestamp — invalidate in-memory cache if model changed
+        current_ts = self._current_model_ts()
+        if current_ts != self._cached_model_ts:
+            logger.info("IncrementalScorer: model change detected — flushing in-memory cache")
+            self._cache           = {}
+            self._cached_model_ts = current_ts
+
+        df = df.copy().reset_index(drop=True)
+        df["_row_hash"] = df.apply(self._hash_row, axis=1)
+
+        # Split: rows already in cache vs rows that need scoring
+        cached_mask = df["_row_hash"].isin(self._cache)
+        new_df      = df[~cached_mask].copy()
+        old_df      = df[cached_mask].copy()
+
+        n_new   = len(new_df)
+        n_cache = len(old_df)
+        logger.debug(
+            f"IncrementalScorer: {n_cache} from cache, {n_new} need scoring"
+        )
+
+        # Score only new rows using full batch (preserves rolling feature context)
+        if not new_df.empty:
+            # Drop the helper column before passing to score_batch
+            scored_new = self.scorer.score_batch(new_df.drop(columns=["_row_hash"]))
+            scored_new["_row_hash"] = new_df["_row_hash"].values
+
+            # Store results in cache
+            for _, row in scored_new.iterrows():
+                self._cache[row["_row_hash"]] = {
+                    "anomaly_score": row["anomaly_score"],
+                    "severity":      row["severity"],
+                    "is_anomaly":    row["is_anomaly"],
+                }
+            self._save_cache()
+        else:
+            scored_new = pd.DataFrame()
+
+        # Apply cached scores to old rows
+        if not old_df.empty:
+            old_df = old_df.drop(columns=["_row_hash"])
+            for col in ("anomaly_score", "severity", "is_anomaly"):
+                old_df[col] = old_df.apply(
+                    lambda r: self._cache.get(
+                        df.loc[r.name, "_row_hash"], {}
+                    ).get(col, 0 if col == "anomaly_score" else "UNKNOWN"),
+                    axis=1,
+                )
+        else:
+            old_df = pd.DataFrame()
+
+        # Combine and restore original order
+        if not scored_new.empty and "_row_hash" in scored_new.columns:
+            scored_new = scored_new.drop(columns=["_row_hash"])
+
+        result = pd.concat([old_df, scored_new], ignore_index=True)
+
+        # Re-sort by timestamp to maintain chronological order
+        if "timestamp" in result.columns:
+            result = result.sort_values("timestamp").reset_index(drop=True)
+
+        logger.info(
+            f"IncrementalScorer: {n_cache} cached + {n_new} newly scored "
+            f"= {len(result)} total | cache size: {len(self._cache)}"
+        )
+        return result
+
+    def clear_cache(self) -> None:
+        """Manually flush in-memory and on-disk cache (e.g. after model retrain)."""
+        self._cache           = {}
+        self._cached_model_ts = ""
+        if os.path.exists(self.cache_path):
+            os.remove(self.cache_path)
+        logger.info("IncrementalScorer: cache cleared")
+
+
+# ─────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────
 

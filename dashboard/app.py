@@ -22,7 +22,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import load_config
-from core.detection.model import AnomalyScorer, classify_severity
+from core.detection.model import AnomalyScorer, IncrementalScorer, classify_severity
 from core.advisor.claude import ThreatAdvisor
 from core.discovery.asset_registry import AssetRegistry
 from compliance.iec62443_mapper import (
@@ -113,6 +113,11 @@ def get_scorer():
     return AnomalyScorer("data/models/ot_model.pkl")
 
 @st.cache_resource
+def get_incremental_scorer(_scorer):
+    """Incremental scorer backed by on-disk cache — only new events hit the ML model."""
+    return IncrementalScorer(_scorer, cache_path="data/models/score_cache.pkl")
+
+@st.cache_resource
 def get_advisor(_config):
     return ThreatAdvisor(
         mode=_config.llm.mode,
@@ -127,8 +132,9 @@ def get_cached_threat_analysis(anomaly_dict, _config_mode):
     advisor = get_advisor(get_config())
     return advisor.analyze(anomaly_dict)
 
-config = get_config()
-scorer = get_scorer()
+config           = get_config()
+scorer           = get_scorer()
+incremental      = get_incremental_scorer(scorer)
 
 # Initialize Asset Registry in Session State
 if "asset_registry" not in st.session_state:
@@ -187,19 +193,20 @@ def load_events(hours: int = 24) -> pd.DataFrame:
     return df
 
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
-    """Score all events using batch Isolation Forest scoring.
+    """Score events using incremental Isolation Forest scoring.
 
-    Uses score_batch() which processes the entire DataFrame at once:
-    - Rolling features (delta_time, burst detection) are computed on the full
-      batch, giving each event correct neighbourhood context.
-    - Normalization uses training-data bounds stored in the model pickle, so
-      scores are stable regardless of batch size (no min==max collapse).
-    - Passively updates the asset registry for Purdue topology mapping.
+    Only rows not yet in the on-disk cache are passed to Isolation Forest.
+    Previously-seen events are served instantly from cache, reducing ML
+    invocations from O(N_total) to O(N_new) on each dashboard refresh —
+    the same pattern used by enterprise SIEM platforms.
+
+    Cache is automatically invalidated when the model is retrained
+    (tracked via the 'trained_at' timestamp in the model pickle metadata).
     """
     if df.empty:
         return df
 
-    scored = scorer.score_batch(df)
+    scored = incremental.score_incremental(df)
 
     # Passively update asset registry from scored results
     for _, row in scored.iterrows():
