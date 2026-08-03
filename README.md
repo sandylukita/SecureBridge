@@ -292,6 +292,7 @@ python core/capture/monitor.py config/live.yaml
 ## 📖 User Manual & Documentation
 - 📘 **Complete User Manual**: See [`USER-GUIDE.md`](USER-GUIDE.md) for end-to-end instructions from installation to SOC dashboard & PDF compliance reports.
 - ☁️ **Azure Showcase Guide**: See [`AZURE-DEPLOYMENT-GUIDE.md`](AZURE-DEPLOYMENT-GUIDE.md) for Azure deployment & free-tier setup.
+- 🔒 **Air-Gapped Maintenance Guide**: See [`AIR-GAPPED-MAINTENANCE.md`](AIR-GAPPED-MAINTENANCE.md) for USB offline LLM model transfers & 30-day local ML retraining procedures.
 - 🛡️ **Case Study Matrix**: See [`study-case.md`](study-case.md) for 7 verified operational OT security scenarios.
 
 ---

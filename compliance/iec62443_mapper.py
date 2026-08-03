@@ -1,8 +1,29 @@
-"""
-IEC 62443 Compliance Mapper
-Maps SecureBridge findings to IEC 62443 Security Requirements
-Sandy Lukita | PT Optima Sarana Instrument
-"""
+import os
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+
+# ─────────────────────────────────────────────
+# IEC 62443-3-2 Scope Definition (SUC)
+# ─────────────────────────────────────────────
+
+@dataclass
+class SystemUnderConsideration:
+    """
+    IEC 62443-3-2: Step 1 — System Under Consideration (SUC) Definition
+    Defines explicit assessment boundaries, in-scope assets, and excluded systems
+    to prevent scope creep and ensure audit completeness.
+    """
+    name: str = "Primary SCADA & DCS Control Network"
+    description: str = "Industrial control network for process monitoring and PLC operations"
+    boundary_devices: List[str] = field(default_factory=lambda: ["PLC-01", "PLC-02", "PLC-03", "SCADA-Server-01", "HMI-Operator-01"])
+    excluded_systems: List[str] = field(default_factory=lambda: ["Corporate ERP Network", "Safety Instrumented System (SIS Level 3 - Read Only)"])
+    business_owner: str = "PT Optima Sarana Instrument / Client Operations"
+    assessment_date: str = "August 2026"
+    target_sl: str = "SL-2 (Target)"
+
+    def validate_boundary(self) -> bool:
+        """Ensure boundary is non-empty and valid"""
+        return len(self.boundary_devices) > 0 and len(self.excluded_systems) > 0
 
 # ─────────────────────────────────────────────
 # IEC 62443 Security Requirements Database
@@ -290,3 +311,103 @@ def get_priority_findings(findings: dict) -> list:
         )
     )
     return sorted_findings
+
+
+# ─────────────────────────────────────────────
+# IEC 62443-3-2 Formal Risk Register & Iterative Loop
+# ─────────────────────────────────────────────
+
+def calculate_residual_risk(
+    initial_risk: int,
+    countermeasures: List[Dict],
+    acceptance_threshold: int = 5
+) -> Dict:
+    """
+    IEC 62443-3-2: Iterative mitigation process.
+    Applies countermeasures sequentially until residual risk is at or below acceptance_threshold.
+    """
+    current_risk = initial_risk
+    iteration_log = []
+
+    for i, measure in enumerate(countermeasures, 1):
+        reduction = measure.get("risk_reduction", 3)
+        risk_before = current_risk
+        current_risk = max(1, current_risk - reduction)
+        accepted = current_risk <= acceptance_threshold
+
+        iteration_log.append({
+            "iteration": i,
+            "measure_applied": measure.get("description", "Remediation countermeasure"),
+            "risk_before": risk_before,
+            "risk_after": current_risk,
+            "accepted": accepted
+        })
+
+        if accepted:
+            break
+
+    return {
+        "initial_risk": initial_risk,
+        "final_residual_risk": current_risk,
+        "accepted": current_risk <= acceptance_threshold,
+        "iterations_required": len(iteration_log),
+        "log": iteration_log
+    }
+
+
+def generate_risk_register(findings: Dict, suc: Optional[SystemUnderConsideration] = None) -> List[Dict]:
+    """
+    Generate formal IEC 62443-3-2 Risk Register with RS1, RS2... numbering.
+    Evaluates 5 impact dimensions: Health/Safety, Environmental, Financial, Reputational, Operational.
+    Impact is evaluated using MAX(dimensions) as per industrial safety guidelines.
+    """
+    if suc is None:
+        suc = SystemUnderConsideration()
+
+    register = []
+    severity_map = {"CRITICAL": (5, 4), "HIGH": (4, 3), "MEDIUM": (3, 2), "LOW": (2, 1)}
+
+    for idx, (vuln_id, finding) in enumerate(findings.items(), 1):
+        sev = finding.get("severity", "MEDIUM")
+        base_impact, base_likelihood = severity_map.get(sev, (3, 2))
+
+        # 5 Impact Dimensions (1-5 scale)
+        impact_scores = {
+            "health_safety": 5 if sev == "CRITICAL" else (4 if sev == "HIGH" else 2),
+            "environmental": 4 if sev in ("CRITICAL", "HIGH") else 2,
+            "financial": 4 if sev in ("CRITICAL", "HIGH") else 3,
+            "reputational": 4 if sev in ("CRITICAL", "HIGH") else 2,
+            "operational": 5 if sev == "CRITICAL" else (4 if sev == "HIGH" else 3),
+        }
+
+        # IEC 62443 Impact = MAX of categories (Safety First)
+        max_impact = max(impact_scores.values())
+        unmitigated_risk = max_impact * base_likelihood
+
+        # Defined countermeasure
+        countermeasures = [{
+            "description": finding.get("remediation", "Implement IEC 62443 countermeasure"),
+            "risk_reduction": 3 if sev in ("CRITICAL", "HIGH") else 2
+        }]
+
+        residual = calculate_residual_risk(unmitigated_risk, countermeasures, acceptance_threshold=6)
+
+        register.append({
+            "risk_number": f"RS{idx}",
+            "vuln_id": vuln_id,
+            "zone": finding.get("zone", "Industrial DMZ / Level 2"),
+            "asset_description": finding.get("title", "Industrial Asset"),
+            "severity": sev,
+            "requirements": finding.get("requirements", []),
+            "impact_scores": impact_scores,
+            "max_impact": max_impact,
+            "likelihood": base_likelihood,
+            "unmitigated_risk": unmitigated_risk,
+            "target_sl": suc.target_sl,
+            "countermeasures": finding.get("remediation", ""),
+            "final_residual_risk": residual["final_residual_risk"],
+            "risk_accepted": residual["accepted"],
+            "status": "MITIGATED" if residual["accepted"] else "OPEN"
+        })
+
+    return register

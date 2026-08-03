@@ -8,6 +8,8 @@ Output:
 2. Executive Summary (Bahasa Indonesia) - for board/management
 """
 
+import os
+import sys
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -18,6 +20,11 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from datetime import datetime
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from compliance.iec62443_mapper import (
     FINDING_TO_IEC, IEC62443_REQUIREMENTS,
     calculate_compliance_score, get_priority_findings
@@ -626,6 +633,57 @@ def build_compliance_map(story, styles):
     story.append(PageBreak())
 
 
+def build_suc_and_risk_register(story, styles):
+    from compliance.iec62443_mapper import SystemUnderConsideration, generate_risk_register
+
+    suc = SystemUnderConsideration()
+    register = generate_risk_register(FINDING_TO_IEC, suc)
+
+    story += section_header("4. SYSTEM UNDER CONSIDERATION (SUC) & RISK REGISTER", styles)
+
+    story.append(Paragraph(
+        f"<b>System Under Consideration (SUC):</b> {suc.name}<br/>"
+        f"<b>Target Security Level:</b> {suc.target_sl} | <b>Business Owner:</b> {suc.business_owner}<br/>"
+        f"<b>In-Scope Boundary Assets:</b> {', '.join(suc.boundary_devices)}<br/>"
+        f"<b>Explicitly Excluded:</b> {', '.join(suc.excluded_systems)}",
+        styles["Body"]
+    ))
+    story.append(Spacer(1, 10))
+
+    headers = [
+        Paragraph("Risk #", styles["Table_Header"]),
+        Paragraph("Zone / Asset", styles["Table_Header"]),
+        Paragraph("Severity", styles["Table_Header"]),
+        Paragraph("Unmitigated Risk", styles["Table_Header"]),
+        Paragraph("Residual Risk", styles["Table_Header"]),
+        Paragraph("Status", styles["Table_Header"]),
+    ]
+
+    rows = [headers]
+    for item in register:
+        rows.append([
+            Paragraph(item["risk_number"], ParagraphStyle("RN", fontSize=8.5, fontName="Helvetica-Bold", textColor=NAVY, alignment=TA_CENTER)),
+            Paragraph(f"{item['zone']}<br/><font size=7 color='#555555'>{item['asset_description']}</font>", styles["Table_Cell"]),
+            Paragraph(item["severity"], ParagraphStyle("RSV", fontSize=8, textColor=severity_color(item["severity"]), fontName="Helvetica-Bold", alignment=TA_CENTER)),
+            Paragraph(f"Score: {item['unmitigated_risk']} (Imp: {item['max_impact']} x Lik: {item['likelihood']})", styles["Table_Cell"]),
+            Paragraph(f"Score: {item['final_residual_risk']}", styles["Table_Cell"]),
+            Paragraph(item["status"], ParagraphStyle("RST", fontSize=8, textColor=colors.HexColor('#2e7d32') if item['risk_accepted'] else RED, fontName="Helvetica-Bold", alignment=TA_CENTER)),
+        ])
+
+    story.append(Table(
+        rows,
+        colWidths=[18 * mm, 45 * mm, 22 * mm, 38 * mm, 27 * mm, 20 * mm],
+        style=TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor('#dce1e7')),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ])
+    ))
+    story.append(Spacer(1, 14))
+
+
 # ─────────────────────────────────────────────
 # Remediation Roadmap
 # ─────────────────────────────────────────────
@@ -944,6 +1002,7 @@ def generate_report(client_data: dict, output_path: str):
     build_executive_summary(story, client_data, compliance_score, styles)
     build_findings(story, styles)
     build_compliance_map(story, styles)
+    build_suc_and_risk_register(story, styles)
     build_roadmap(story, styles)
     build_bahasa_summary(story, client_data, compliance_score, styles)
 

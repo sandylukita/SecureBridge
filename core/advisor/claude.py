@@ -455,6 +455,24 @@ class ThreatAdvisor:
             f"ollama: {'OK' if self._ollama and self._ollama.available else 'unavailable'}"
         )
 
+    def should_invoke_llm(self, anomaly: dict) -> bool:
+        """
+        Air-Gapped Response Strategy (Security Guard vs Detective Tiering):
+        - CRITICAL / HIGH severity: Always invoke LLM for full threat reasoning.
+        - MEDIUM severity: Invoke LLM if anomaly_score >= 70 or is_write is True.
+        - LOW severity / background noise: Use rule-based engine directly to preserve
+          edge CPU/RAM resources and avoid LLM inference fatigue.
+        """
+        severity = anomaly.get("severity", "LOW")
+        score = anomaly.get("anomaly_score", 0.0)
+        is_write = anomaly.get("is_write", False)
+
+        if severity in ("CRITICAL", "HIGH"):
+            return True
+        elif severity == "MEDIUM" and (score >= 70.0 or is_write):
+            return True
+        return False
+
     # ── Public API ────────────────────────────────────────────
 
     def analyze(self, anomaly: dict) -> dict:
@@ -466,6 +484,14 @@ class ThreatAdvisor:
         See module docstring for full output schema.
         """
         severity = anomaly.get("severity", "LOW")
+
+        # Response Tiering Check: Preserve LLM resources for high-value threats
+        if not self.should_invoke_llm(anomaly):
+            logger.info(
+                f"[Tiering Filter] Event {anomaly.get('device_id')} ({severity}) "
+                f"handled by ML baseline — LLM skipped to preserve edge CPU"
+            )
+            return self._fallback_analysis(anomaly)
 
         try:
             if self.mode == "gemini":
