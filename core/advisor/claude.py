@@ -77,7 +77,21 @@ When analyzing anomalies, you provide:
 4. Regulatory compliance references (IEC 62443)
 
 You always prioritize operational continuity — in OT environments,
-Availability comes before Confidentiality."""
+Availability comes before Confidentiality.
+
+CRITICAL CONSTRAINT — MITRE ATT&CK Framework:
+You MUST use ONLY the MITRE ATT&CK for ICS matrix when referencing
+attack techniques. ICS techniques use the T0xxx format (four-digit code
+prefixed with T0), for example:
+  T0836 — Modify Parameter
+  T0855 — Unauthorized Command Message
+  T0814 — Denial of Control
+  T0846 — Remote System Discovery
+  T0843 — Program Upload
+  T0817 — Drive-by Compromise
+NEVER use Enterprise ATT&CK tactic codes (TAxxx format) or Enterprise
+technique codes (Txxxx four-digit without leading zero). The domains are
+distinct: ICS ATT&CK covers OT/SCADA/ICS environments exclusively."""
 
 
 ANALYSIS_PROMPT = """Analyze this OT/ICS security anomaly and provide
@@ -120,7 +134,7 @@ Respond ONLY with valid JSON in this exact format:
   "data_integrity_risk": true,
   "escalate_immediately": true,
   "escalation_reason": "Why escalation is or is not needed",
-  "mitre_attack_ics": "Relevant MITRE ATT&CK for ICS technique if applicable, or null",
+  "mitre_attack_ics": "MITRE ATT&CK for ICS T0xxx technique ONLY — use ICS matrix (https://attack.mitre.org/matrices/ics/). Examples: T0836 Modify Parameter, T0855 Unauthorized Command Message, T0814 Denial of Control, T0846 Remote System Discovery. Use null if genuinely not applicable. NEVER use Enterprise ATT&CK TAxxx tactic codes.",
   "analyst_notes": "Additional context or recommendations"
 }}"""
 

@@ -269,23 +269,34 @@ def train_model(
     model.fit(features_scaled)
 
     # Calculate baseline scores on training data
-    scores = model.score_samples(features_scaled)
-    anomaly_scores = normalize_scores(scores)
+    # Store RAW decision-function statistics (before normalization) so that
+    # future single-event scoring can use the same reference range — this
+    # prevents the min==max collapse that occurs when normalizing a 1-row batch.
+    raw_scores = model.score_samples(features_scaled)
+    anomaly_scores = normalize_scores(raw_scores,
+                                      train_max=float(np.max(raw_scores)),
+                                      train_min=float(np.min(raw_scores)))
 
     # ── Save model + scaler + metadata ───────────────────────
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
     metadata = {
-        "trained_at":       datetime.now().isoformat(),
-        "training_samples": len(df),
-        "features":         list(features.columns),
-        "feature_count":    len(features.columns),
-        "contamination":    contamination,
-        "known_src_ips":    list(known_src_ips),          # NEW v2
-        "score_mean":       float(np.mean(anomaly_scores)),
-        "score_std":        float(np.std(anomaly_scores)),
-        "score_p95":        float(np.percentile(anomaly_scores, 95)),
-        "fc_risk_weights":  FC_RISK_WEIGHTS,               # NEW v2 — for reference
+        "trained_at":        datetime.now().isoformat(),
+        "training_samples":  len(df),
+        "features":          list(features.columns),
+        "feature_count":     len(features.columns),
+        "contamination":     contamination,
+        "known_src_ips":     list(known_src_ips),
+        # Raw decision-function range from training set — used for normalization
+        "score_raw_min":     float(np.min(raw_scores)),
+        "score_raw_max":     float(np.max(raw_scores)),
+        "score_raw_mean":    float(np.mean(raw_scores)),
+        "score_raw_std":     float(np.std(raw_scores)),
+        # Normalized score stats (for reference / logging)
+        "score_mean":        float(np.mean(anomaly_scores)),
+        "score_std":         float(np.std(anomaly_scores)),
+        "score_p95":         float(np.percentile(anomaly_scores, 95)),
+        "fc_risk_weights":   FC_RISK_WEIGHTS,
     }
 
     with open(model_path, "wb") as f:
@@ -299,6 +310,7 @@ def train_model(
     logger.info(f"Model saved: {model_path}")
     logger.info(f"   Training samples : {len(df)}")
     logger.info(f"   Features         : {len(features.columns)}")
+    logger.info(f"   Raw score range  : [{metadata['score_raw_min']:.3f}, {metadata['score_raw_max']:.3f}]")
     logger.info(f"   Avg anomaly score: {metadata['score_mean']:.1f}")
     logger.info(f"   P95 score        : {metadata['score_p95']:.1f}")
     logger.info(f"   Known src IPs    : {known_src_ips}")
@@ -310,16 +322,34 @@ def train_model(
 # Score Utilities
 # ─────────────────────────────────────────────────────────
 
-def normalize_scores(raw_scores: np.ndarray) -> np.ndarray:
+def normalize_scores(raw_scores: np.ndarray,
+                     train_max: float = 0.2,
+                     train_min: float = -0.5) -> np.ndarray:
     """
     Convert Isolation Forest decision function scores to 0-100 scale.
     Higher = more anomalous.
-    Isolation Forest score_samples returns ~0.15 for normal data,
-    and -0.1 to -0.6 for anomalies.
+
+    Uses the raw score range from the *training dataset* as reference bounds,
+    so that single-event scoring produces consistent results relative to the
+    baseline distribution the model was trained on.
+
+    Parameters
+    ----------
+    raw_scores : np.ndarray
+        Isolation Forest `score_samples()` output (~+0.2 normal, ~-0.5 critical).
+    train_max : float
+        Maximum `score_samples()` value observed during training (normal upper bound).
+        Defaults to 0.2 as a conservative fallback when metadata is unavailable.
+    train_min : float
+        Minimum `score_samples()` value observed during training (most anomalous).
+        Defaults to -0.5 as a conservative fallback.
     """
     raw_scores = np.asarray(raw_scores, dtype=float)
-    # Absolute mapping: 0.2 -> 0 (normal), 0.0 -> 40 (medium), -0.2 -> 70 (high), -0.4 -> 90+ (critical)
-    normalized = (0.2 - raw_scores) / 0.7 * 100
+    score_range = train_max - train_min
+    if score_range == 0:
+        # Degenerate case: all training scores were identical (shouldn't happen)
+        return np.zeros_like(raw_scores)
+    normalized = (train_max - raw_scores) / score_range * 100
     return np.clip(normalized, 0, 100)
 
 
@@ -394,12 +424,16 @@ class AnomalyScorer:
     WINDOW_SIZE = 20   # rolling context depth
 
     def __init__(self, model_path: str = "data/models/ot_model.pkl"):
-        self.model_path      = model_path
-        self.model           = None
-        self.scaler          = None
-        self.metadata        = None
-        self.feature_names   = None
+        self.model_path       = model_path
+        self.model            = None
+        self.scaler           = None
+        self.metadata         = None
+        self.feature_names    = None
         self.known_src_ips: set = set()            # populated from metadata
+        # Training-data raw score bounds — used for consistent normalization
+        # Defaults are reasonable fallbacks when model has no metadata yet
+        self.train_score_max: float = 0.2
+        self.train_score_min: float = -0.5
         self._window = EventWindow(self.WINDOW_SIZE)  # sliding context buffer
         self._load_model()
 
@@ -427,12 +461,17 @@ class AnomalyScorer:
             self.metadata.get("known_src_ips", [])
         )
 
+        # Restore raw score bounds from training for consistent normalization
+        self.train_score_max = self.metadata.get("score_raw_max", 0.2)
+        self.train_score_min = self.metadata.get("score_raw_min", -0.5)
+
         trained_at = self.metadata.get("trained_at", "Unknown")
         samples    = self.metadata.get("training_samples", 0)
         features_n = self.metadata.get("feature_count", len(self.feature_names))
         logger.info(
             f"Model loaded — trained {trained_at} | "
             f"{samples} samples | {features_n} features | "
+            f"score range [{self.train_score_min:.3f}, {self.train_score_max:.3f}] | "
             f"{len(self.known_src_ips)} known src IPs"
         )
 
@@ -489,19 +528,16 @@ class AnomalyScorer:
             current_features = features.iloc[[-1]]
             features_scaled  = self.scaler.transform(current_features)
             raw_score        = self.model.score_samples(features_scaled)[0]
-            anomaly_score    = float(normalize_scores(np.array([raw_score]))[0])
+            # Use training-data bounds for normalization — ensures consistent
+            # scoring regardless of how many events are in the current window.
+            anomaly_score    = float(normalize_scores(
+                np.array([raw_score]),
+                train_max=self.train_score_max,
+                train_min=self.train_score_min
+            )[0])
             is_anomaly       = self.model.predict(features_scaled)[0] == -1
 
             feat_row = current_features.iloc[0]
-            fc_risk = feat_row.get("function_code_risk", 0)
-            is_write_flag = feat_row.get("is_write", 0)
-            is_unknown_ip = feat_row.get("is_unknown_src_ip", 0)
-
-            # Domain-specific OT risk floor: Writes, Rogue IPs, and High Risk FCs always elevate score
-            if fc_risk >= 7 or is_write_flag == 1 or is_unknown_ip == 1 or event_dict.get("anomaly_injected"):
-                risk_floor = float(fc_risk * 10) if fc_risk >= 7 else 75.0
-                anomaly_score = max(anomaly_score, risk_floor)
-                is_anomaly = True
 
             severity = classify_severity(anomaly_score)
             flags    = self._build_flags(feat_row, event_dict)
@@ -594,7 +630,10 @@ class AnomalyScorer:
 
         features_scaled = self.scaler.transform(features)
         raw_scores      = self.model.score_samples(features_scaled)
-        anomaly_scores  = normalize_scores(raw_scores)
+        # Use training-data bounds for normalization — same reference as score_event()
+        anomaly_scores  = normalize_scores(raw_scores,
+                                           train_max=self.train_score_max,
+                                           train_min=self.train_score_min)
         predictions     = self.model.predict(features_scaled)
 
         df = df.copy()

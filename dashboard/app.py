@@ -141,6 +141,14 @@ asset_registry = st.session_state.asset_registry
 # ─────────────────────────────────────────────────────────
 
 def load_events(hours: int = 24) -> pd.DataFrame:
+    """Load all OT events within the given time window from disk.
+
+    No sampling is applied — security dashboards must process every event.
+    Sampling in a security context introduces deliberate false-negative risk:
+    a 1-in-2000 CRITICAL event that happens to fall outside a random sample
+    will be silently missed. Instead we load the complete time window and let
+    Isolation Forest decide what is anomalous.
+    """
     log_dir = config.log_dir
     if not os.path.exists(log_dir):
         return pd.DataFrame()
@@ -153,6 +161,7 @@ def load_events(hours: int = 24) -> pd.DataFrame:
     if not all_files:
         return pd.DataFrame()
 
+    # Load the two most recent files (today + yesterday) to cover multi-day windows
     latest_files = sorted(all_files, reverse=True)[:2]
     dfs = []
     for f in latest_files:
@@ -167,6 +176,7 @@ def load_events(hours: int = 24) -> pd.DataFrame:
 
     df = pd.concat(dfs, ignore_index=True)
 
+    # Filter to the requested time window only
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         cutoff = datetime.now() - timedelta(hours=hours)
@@ -174,53 +184,28 @@ def load_events(hours: int = 24) -> pd.DataFrame:
         if not df_filtered.empty:
             df = df_filtered
 
-    # Smart sampling: Always preserve anomaly events + latest normal events (max 250 rows)
-    anomaly_events = df[
-        (df.get("anomaly_injected") == True) |
-        (df.get("is_write") == True) |
-        (df.get("function_code").isin([5, 6, 15, 16, 43])) |
-        (df.get("src_ip") == "192.168.10.199")
-    ]
-    recent_events = df.tail(150)
-    
-    combined = pd.concat([anomaly_events, recent_events], ignore_index=False)
-    combined = combined.drop_duplicates().sort_values("timestamp").tail(250)
-
-    return combined
+    return df
 
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
+    """Score all events using batch Isolation Forest scoring.
+
+    Uses score_batch() which processes the entire DataFrame at once:
+    - Rolling features (delta_time, burst detection) are computed on the full
+      batch, giving each event correct neighbourhood context.
+    - Normalization uses training-data bounds stored in the model pickle, so
+      scores are stable regardless of batch size (no min==max collapse).
+    - Passively updates the asset registry for Purdue topology mapping.
+    """
     if df.empty:
         return df
 
-    local_scorer = AnomalyScorer("data/models/ot_model.pkl")
-    scored_rows = []
-    for _, row in df.iterrows():
-        row_dict = row.to_dict()
-        event_dict = {
-            "timestamp": str(row_dict.get("timestamp", "")),
-            "src_ip": str(row_dict.get("src_ip", "0.0.0.0")),
-            "dst_ip": str(row_dict.get("dst_ip", "0.0.0.0")),
-            "protocol": str(row_dict.get("protocol", "Modbus TCP")),
-            "event_type": str(row_dict.get("event_type", "MODBUS_READ")),
-            "unit_id": row_dict.get("unit_id"),
-            "function_code": row_dict.get("function_code"),
-            "function_name": str(row_dict.get("function_name", "")),
-            "register_address": row_dict.get("register_address"),
-            "value": row_dict.get("value"),
-            "device_id": str(row_dict.get("device_id", "PLC-01")),
-            "payload_length": row_dict.get("payload_length", 0),
-            "raw_size": row_dict.get("raw_size", 64),
-            "is_write": bool(row_dict.get("is_write", False)),
-            "transaction_id": str(row_dict.get("transaction_id", "")),
-            "anomaly_injected": bool(row_dict.get("anomaly_injected", False)),
-        }
-        res = local_scorer.score_event(event_dict)
-        scored_rows.append(res)
-        
-        # Passively update asset registry
-        asset_registry.process_event(res)
+    scored = scorer.score_batch(df)
 
-    return pd.DataFrame(scored_rows)
+    # Passively update asset registry from scored results
+    for _, row in scored.iterrows():
+        asset_registry.process_event(row.to_dict())
+
+    return scored
 
 # ─────────────────────────────────────────────────────────
 # Sidebar Controls
