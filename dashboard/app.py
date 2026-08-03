@@ -153,7 +153,7 @@ def load_events(hours: int = 24) -> pd.DataFrame:
     if not all_files:
         return pd.DataFrame()
 
-    latest_files = sorted(all_files, reverse=True)[:3]
+    latest_files = sorted(all_files, reverse=True)[:2]
     dfs = []
     for f in latest_files:
         try:
@@ -172,14 +172,18 @@ def load_events(hours: int = 24) -> pd.DataFrame:
         cutoff = datetime.now() - timedelta(hours=hours)
         df_filtered = df[df["timestamp"] >= cutoff]
         if not df_filtered.empty:
-            return df_filtered
+            return df_filtered.tail(150)
 
-    # Fallback: if cutoff returns empty, return the most recent events so dashboard is always rich!
-    return df.tail(500)
+    # Fallback: if cutoff returns empty, return the most recent 150 events for instant rendering!
+    return df.tail(150)
 
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
+
+    # Limit to 150 events max for instant sub-second ML scoring
+    if len(df) > 150:
+        df = df.tail(150)
 
     scored_rows = []
     for _, row in df.iterrows():
