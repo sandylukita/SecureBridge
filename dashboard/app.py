@@ -25,6 +25,7 @@ from config.settings import load_config
 from core.detection.model import AnomalyScorer, IncrementalScorer, classify_severity
 from core.advisor.claude import ThreatAdvisor
 from core.discovery.asset_registry import AssetRegistry
+from core.threat_intel import ThreatIntelFeed
 from compliance.iec62443_mapper import (
     FINDING_TO_IEC, IEC62443_REQUIREMENTS,
     SystemUnderConsideration, generate_risk_register,
@@ -135,6 +136,10 @@ def get_cached_threat_analysis(anomaly_dict, _config_mode):
 config           = get_config()
 scorer           = get_scorer()
 incremental      = get_incremental_scorer(scorer)
+threat_intel     = ThreatIntelFeed(
+    cache_path="data/threat_intel/cisa_cache.json",
+    mode=config.mode,
+)
 
 # Initialize Asset Registry in Session State
 if "asset_registry" not in st.session_state:
@@ -559,8 +564,43 @@ with tab2:
     ]
     st.dataframe(pd.DataFrame(assets_table), use_container_width=True)
 
-# ─────────────────────────────────────────────────────────
-# TAB 3: SCADA / HMI PROCESS TELEMETRY
+    # ── CISA ICS-CERT Threat Intelligence Panel ───────────
+    st.markdown("---")
+    st.markdown("#### 🛡️ CISA ICS-CERT Threat Intelligence")
+    meta = threat_intel.get_cache_metadata()
+    if meta["fetched_at"]:
+        sync_ts = meta["fetched_at"][:19].replace("T", " ")
+        st.caption(
+            f"🔄 Advisory cache synced: **{sync_ts}** | "
+            f"Source: [CISA ICS-CERT](https://www.cisa.gov/cybersecurity-advisories/ics-advisories) (Public) | "
+            f"{meta['total']} total advisories loaded"
+        )
+    else:
+        st.warning("⚠️ CISA cache not found. Run: `python core/threat_intel/fetch_advisories.py`")
+
+    # Show advisories per seeded asset
+    for asset in list(asset_registry.assets.values())[:6]:
+        intel = threat_intel.get_asset_intel(asset.ip, asset.vendor)
+        if intel["total_advisories"] == 0:
+            continue
+        crit_n = intel["critical_advisories"]
+        high_n = intel["high_advisories"]
+        badge  = "🔴 CRITICAL" if crit_n > 0 else "🟠 HIGH" if high_n > 0 else "🟡 MEDIUM"
+        with st.expander(
+            f"{badge} {asset.name} ({asset.vendor}) — "
+            f"{intel['total_advisories']} active advisories"
+        ):
+            for adv in intel["latest_advisories"]:
+                cvss = adv.get("cvss")
+                cvss_str = f"CVSS {cvss:.1f}" if cvss else "CVSS N/A"
+                cves_str = ", ".join(adv.get("cves", [])) or "No CVE"
+                st.markdown(
+                    f"**[{adv['id']}]({adv['url']})** — {adv['title']}  \n"
+                    f"_{cvss_str} | {cves_str} | Published: {adv.get('published', 'N/A')}_  \n"
+                    f"{adv.get('summary', '')}"
+                )
+                st.divider()
+
 # ─────────────────────────────────────────────────────────
 
 with tab3:

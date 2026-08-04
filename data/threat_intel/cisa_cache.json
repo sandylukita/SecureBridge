@@ -1,0 +1,82 @@
+{
+  "fetched_at": "2026-08-04T13:43:29.775648",
+  "source": "CISA ICS-CERT (bundled demo cache)",
+  "source_url": "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",
+  "total": 6,
+  "advisories": [
+    {
+      "id": "ICSA-24-102-01",
+      "title": "Schneider Electric EcoStruxure Power Monitoring Expert",
+      "vendor": "Schneider Electric",
+      "cves": [
+        "CVE-2024-2229",
+        "CVE-2024-2230"
+      ],
+      "cvss": 9.8,
+      "published": "2024-04-11",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-102-01",
+      "summary": "Successful exploitation could allow remote code execution or DoS. Affects EcoStruxure Power Monitoring Expert versions prior to 2021 SP1."
+    },
+    {
+      "id": "ICSA-24-074-02",
+      "title": "Schneider Electric Modicon M340 PLC Authentication Bypass",
+      "vendor": "Schneider Electric",
+      "cves": [
+        "CVE-2024-2400"
+      ],
+      "cvss": 8.1,
+      "published": "2024-03-14",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-074-02",
+      "summary": "Modicon M340, Momentum, and MC80 PLCs contain authentication bypass via Modbus protocol on port 502. Attacker with network access can gain unauthorized write access to PLC registers."
+    },
+    {
+      "id": "ICSA-24-107-01",
+      "title": "Rockwell Automation FactoryTalk View SE RCE",
+      "vendor": "Rockwell Automation",
+      "cves": [
+        "CVE-2024-21915"
+      ],
+      "cvss": 9.0,
+      "published": "2024-04-16",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-107-01",
+      "summary": "FactoryTalk View SE is vulnerable to RCE. A threat actor with network access could execute arbitrary code on HMI workstations at Purdue Level 2."
+    },
+    {
+      "id": "ICSA-24-016-04",
+      "title": "Rockwell Allen-Bradley 1756 ControlLogix Vulnerabilities",
+      "vendor": "Rockwell Automation",
+      "cves": [
+        "CVE-2024-21917",
+        "CVE-2024-21918"
+      ],
+      "cvss": 8.5,
+      "published": "2024-01-16",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-016-04",
+      "summary": "Multiple vulnerabilities in Allen-Bradley 1756 ControlLogix allow authenticated user to execute malicious code on the device via EtherNet/IP protocol."
+    },
+    {
+      "id": "ICSA-24-130-01",
+      "title": "Siemens SIMATIC S7-1200 and S7-1500 CPU Denial of Service",
+      "vendor": "Siemens",
+      "cves": [
+        "CVE-2024-30321"
+      ],
+      "cvss": 7.5,
+      "published": "2024-05-09",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-130-01",
+      "summary": "Siemens S7-1200 and S7-1500 PLCs contain improper input validation. Exploitation causes denial-of-service via crafted S7 protocol packets."
+    },
+    {
+      "id": "ICSA-24-193-03",
+      "title": "Siemens SCALANCE Network Devices Path Traversal",
+      "vendor": "Siemens",
+      "cves": [
+        "CVE-2024-34057"
+      ],
+      "cvss": 8.2,
+      "published": "2024-07-11",
+      "url": "https://www.cisa.gov/news-events/ics-advisories/icsa-24-193-03",
+      "summary": "Siemens SCALANCE industrial switches contain path traversal allowing authenticated remote attacker to read arbitrary files from device filesystem."
+    }
+  ]
+}
