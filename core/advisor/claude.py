@@ -242,7 +242,7 @@ class ClaudeBackend:
             )
             return
         try:
-            self.client    = anthropic.Anthropic(api_key=api_key)
+            self.client    = anthropic.Anthropic(api_key=api_key, max_retries=0)
             self.available = True
             logger.info(f"Claude backend ready — model: {self.model}")
         except Exception as exc:
@@ -310,9 +310,13 @@ class GeminiBackend:
 
         prompt = _build_prompt(anomaly)
         generation_config = {"response_mime_type": "application/json"}
+        
+        from google.api_core import retry
+        # Disable retry so Streamlit doesn't hang indefinitely on 429 errors
         response = self.client.generate_content(
             prompt,
-            generation_config=generation_config
+            generation_config=generation_config,
+            request_options={"retry": retry.Retry(initial=0, maximum=0, timeout=10.0)}
         )
         raw = response.text
         analysis = _clean_json(raw)
