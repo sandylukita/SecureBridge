@@ -1,18 +1,11 @@
 """
 SecureBridge — CISA Advisory Pre-Fetch Script
-Run this BEFORE a demo or interview to populate the local cache.
+Sandy Lukita | PT Optima Sarana Instrument
 
-Usage:
-    python core/threat_intel/fetch_advisories.py
+Populates local cache (data/threat_intel/cisa_cache.json) using EXCLUSIVELY
+the 5 human-verified CISA advisories from CISA.gov provided by the user.
 
-This script:
-  1. Populates 100% REAL, VERIFIED CISA ICS advisories from CISA.gov
-     for Schneider Electric, Rockwell Automation, and Siemens S7.
-  2. Saves to data/threat_intel/cisa_cache.json with fetched_at timestamp
-  3. Dashboard uses this cached file -- zero live API calls during demo
-
-Every advisory in this cache is a REAL CISA.gov advisory with authentic
-ICSA IDs, real CVE references, exact CVSS scores, and working CISA.gov URLs.
+No LLM-generated or assumed advisories are used.
 """
 
 import sys
@@ -20,7 +13,6 @@ import os
 import json
 import logging
 
-# Resolve project root
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, _ROOT)
 
@@ -35,89 +27,69 @@ from core.threat_intel.feed_aggregator import ThreatIntelFeed, VENDOR_KEYWORDS
 CACHE_PATH = os.path.join(_ROOT, "data", "threat_intel", "cisa_cache.json")
 
 
-def write_verified_cisa_cache(cache_path: str):
+def write_human_verified_cisa_cache(cache_path: str):
     """
-    Write a 100% authentic, verified cache of real CISA ICS Advisories
-    published on CISA.gov for Schneider Electric, Rockwell Automation, and Siemens.
-
-    All URLs, ICSA IDs, CVEs, and descriptions are cross-referenced with CISA.gov.
+    Write EXCLUSIVELY the 5 human-verified CISA ICS Advisories from CISA.gov.
     """
     from datetime import datetime
     bundled = {
         "fetched_at": datetime.now().isoformat(),
-        "source":     "CISA ICS-CERT (Official CISA.gov Advisories)",
+        "source":     "CISA ICS-CERT (Human-Verified CISA.gov Data)",
         "source_url": "https://www.cisa.gov/news-events/ics-advisories",
-        "total":      6,
+        "total":      5,
         "advisories": [
             {
                 "id":        "ICSA-23-227-01",
-                "title":     "Schneider Electric Modicon M340, M580, and EcoStruxure Control Expert",
+                "title":     "Schneider Electric EcoStruxure Control Expert and Modicon Controllers",
                 "vendor":    "Schneider Electric",
-                "cves":      ["CVE-2023-38584", "CVE-2023-38585"],
-                "cvss":      7.5,
+                "cves":      ["CVE-2022-45789"],
+                "cvss":      None,
                 "published": "2023-08-15",
                 "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-23-227-01",
-                "summary":   "Schneider Electric EcoStruxure Control Expert and Modicon M340, M580 PLCs contain "
-                             "vulnerabilities concerning unauthorized execution of Modbus functions on port 502, "
-                             "allowing an unauthenticated attacker to cause denial-of-service or unauthorized register modification.",
+                "summary":   "Authentication bypass via Modbus capture-replay in EcoStruxure Control Expert and "
+                             "Modicon M340, M580, Momentum, and MC80 controllers.",
             },
             {
                 "id":        "ICSA-25-035-04",
-                "title":     "Schneider Electric Modicon M580 PLCs and BMENOR2200H",
+                "title":     "Schneider Electric Modicon M580 PLCs, BMENOR2200H, EVLink Pro AC",
                 "vendor":    "Schneider Electric",
-                "cves":      ["CVE-2024-11234"],
-                "cvss":      8.1,
+                "cves":      ["CVE-2024-11425"],
+                "cvss":      8.7,
                 "published": "2025-02-04",
                 "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-25-035-04",
-                "summary":   "Vulnerabilities involving incorrect calculation of buffer size in Modicon M580 PLCs "
-                             "could allow an unauthenticated attacker to send crafted packets, resulting in buffer overflow "
-                             "and real-time process data disruption.",
+                "summary":   "Incorrect buffer size calculation allows DoS condition via specially crafted HTTPS packets "
+                             "on Modicon M580 PLCs and BMENOR2200H communication modules.",
             },
             {
-                "id":        "ICSA-23-346-01",
-                "title":     "Rockwell Automation ControlLogix, GuardLogix, and CompactLogix",
+                "id":        "ICSA-22-090-05",
+                "title":     "Rockwell Automation Logix Controllers (ControlLogix, CompactLogix, GuardLogix)",
                 "vendor":    "Rockwell Automation",
-                "cves":      ["CVE-2023-3595", "CVE-2023-3596"],
-                "cvss":      8.3,
-                "published": "2023-12-12",
-                "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-23-346-01",
-                "summary":   "Always-Incorrect Control Flow Implementation in Rockwell ControlLogix and CompactLogix "
-                             "controllers could allow an attacker to send crafted EtherNet/IP commands to execute "
-                             "unauthorized control flow changes.",
-            },
-            {
-                "id":        "ICSA-23-313-01",
-                "title":     "Rockwell Automation FactoryTalk Service Platform",
-                "vendor":    "Rockwell Automation",
-                "cves":      ["CVE-2023-46290"],
-                "cvss":      8.8,
-                "published": "2023-11-09",
-                "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-23-313-01",
-                "summary":   "An unauthenticated attacker could exploit remote execution vulnerabilities in FactoryTalk "
-                             "Service Platform to achieve arbitrary command execution on Level 2 SCADA/HMI workstations.",
-            },
-            {
-                "id":        "ICSA-25-044-01",
-                "title":     "Siemens SIMATIC S7-1200 CPU Family",
-                "vendor":    "Siemens",
-                "cves":      ["CVE-2024-52541"],
-                "cvss":      7.5,
-                "published": "2025-02-13",
-                "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-25-044-01",
-                "summary":   "Siemens SIMATIC S7-1200 CPUs contain improper packet validation in S7 communication processing. "
-                             "An unauthenticated remote attacker could cause a Denial-of-Service condition by sending specially "
-                             "crafted S7 network packets.",
+                "cves":      ["CVE-2022-1161"],
+                "cvss":      10.0,
+                "published": "2022-03-31",
+                "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-22-090-05",
+                "summary":   "CRITICAL (CVSS 10.0): Attacker can modify PLC executable program code without detection "
+                             "because readable source logic and compiled bytecode are stored separately. Reported by Claroty.",
             },
             {
                 "id":        "ICSA-24-284-01",
-                "title":     "Siemens SIMATIC S7-1500 and S7-1200 CPUs",
+                "title":     "Siemens SIMATIC S7-1500 and S7-1200 CPUs Open Redirect",
                 "vendor":    "Siemens",
-                "cves":      ["CVE-2024-46872"],
-                "cvss":      7.5,
+                "cves":      ["CVE-2024-46886"],
+                "cvss":      5.1,
                 "published": "2024-10-10",
                 "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-24-284-01",
-                "summary":   "Open redirect and web server vulnerabilities in Siemens SIMATIC S7-1500 and S7-1200 integrated "
-                             "web server interfaces could allow an attacker to bypass authentication or hijack active HMI sessions.",
+                "summary":   "Open redirect vulnerability in integrated web server of Siemens SIMATIC S7-1500 and S7-1200 CPUs.",
+            },
+            {
+                "id":        "ICSA-24-284-10",
+                "title":     "Siemens SIMATIC S7-1500 CPUs Information Disclosure",
+                "vendor":    "Siemens",
+                "cves":      ["CVE-2024-46887"],
+                "cvss":      6.9,
+                "published": "2024-10-10",
+                "url":       "https://www.cisa.gov/news-events/ics-advisories/icsa-24-284-10",
+                "summary":   "Unauthenticated attacker can view CPU cycle time and communication load telemetry on SIMATIC S7-1500 CPUs.",
             },
         ]
     }
@@ -129,15 +101,15 @@ def write_verified_cisa_cache(cache_path: str):
 
 def main():
     print("=" * 60)
-    print("  SecureBridge -- CISA ICS-CERT Pre-Fetch")
+    print("  SecureBridge -- Human-Verified CISA Pre-Fetch")
     print("=" * 60)
     print(f"  Cache target : {CACHE_PATH}")
     print()
 
-    print("  Writing verified CISA.gov advisory cache...")
-    bundled = write_verified_cisa_cache(CACHE_PATH)
+    print("  Writing 5 human-verified CISA.gov advisories...")
+    bundled = write_human_verified_cisa_cache(CACHE_PATH)
     advisories = bundled["advisories"]
-    print(f"  [OK] Verified CISA.gov cache written ({len(advisories)} advisories).")
+    print(f"  [OK] Wrote {len(advisories)} human-verified advisories to cache.")
 
     print()
     print("  Vendor breakdown:")
@@ -156,8 +128,7 @@ def main():
     print(f"  Total cached : {meta.get('total', len(advisories))}")
     print(f"  Cache file   : {CACHE_PATH}")
     print()
-    print("  Dashboard is ready with 100% authentic CISA.gov advisories.")
-    print("  All ICSA IDs, CVEs, and URLs can be verified live on CISA.gov.")
+    print("  Cache updated exclusively with human-verified CISA data.")
 
 
 if __name__ == "__main__":
