@@ -1,8 +1,8 @@
 # 📖 SecureBridge — Panduan Pengguna Lengkap (End-to-End User Manual)
 
-Dokumen Version: 1.6.0  
+Dokumen Version: 1.7.0  
 Penulis: Sandy Lukita | PT Optima Sarana Instrument  
-Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Passive Asset Discovery, Penggunaan Cyber SOC Dashboard (4 Tab Interaktif), Incremental ML Scoring, hingga Pembuatan Laporan PDF Audit IEC 62443 (RS1-RS12).
+Tujuan: Panduan Operasional Lengkap dari Instalasi, Konfigurasi, Monitoring Pasif, Passive Asset Discovery, Penggunaan Cyber SOC Dashboard (4 Tab Interaktif), Incremental ML Scoring, Public Threat Intelligence Feed (CISA), hingga Pembuatan Laporan PDF Audit IEC 62443 (RS1-RS12).
 
 ---
 
@@ -194,11 +194,12 @@ Dashboard v1.5.0 dilengkapi dengan **4 Tab Interaktif Utama**:
 - **Expander Alert & DPI Details**: Detail paket deep packet inspection (DPI) + analisis ancaman AI.
 - **Firewall Playbook Generator**: Tombol `🛡️ Preview Firewall Containment Rule` untuk men-generate perintah `iptables` isolasi IP penyerang.
 
-### 🌐 Tab 2: Purdue Network Topology Visualizer
+### 🌐 Tab 2: Purdue Network Topology Visualizer & Threat Intel
 - **Passive Asset Profiling**: Memetakan perangkat secara pasif tanpa active scanning (0% dampak pada PLC).
 - **2D Purdue Model Hierarchy Scatter Graph**: Memvisualisasikan perangkat pada Purdue Layer 1 (PLCs), Layer 2 (SCADA/HMI), dan Layer 3.5 (Industrial DMZ).
 - **Attacked Node Highlighting**: Perangkat penyerang menyala **ORANGE TERBAKAR**, PLC target menyala **MERAH BERKEDIP**.
 - **Asset Inventory Table**: Tabel inventaris IP address, Asset Name, Asset Type, Purdue Level, dan status ancaman.
+- **🛡️ CISA ICS-CERT Threat Intelligence Panel**: Panel rekomendasi kerentanan publik yang mengorelasikan aset vendor terdeteksi (Schneider Electric, Rockwell Automation, Siemens S7) dengan data resmi CISA advisories.
 
 ### 🎛️ Tab 3: SCADA / HMI Process Telemetry
 - **Live Physical Gauges**: Meteran visual kondisi fisik pabrik:
@@ -234,6 +235,28 @@ Refresh #3 (8.031 event)   → Hanya 14 event baru di-score    (<0.01 detik)
 - **Zero false negative**: setiap event baru tetap melalui Isolation Forest — tidak ada blind spot.
 
 > Ini adalah pendekatan yang sama yang digunakan oleh platform SIEM enterprise (Splunk, IBM QRadar) untuk memproses data volume tinggi tanpa mengorbankan kelengkapan deteksi.
+
+---
+
+## 5c. PUBLIC THREAT INTELLIGENCE FEED & AIR-GAPPED GUARD RAILS (v1.7.0)
+
+SecureBridge v1.7.0 mengintegrasikan agregator threat intelligence publik (`ThreatIntelFeed`) dengan prinsip proteksi air-gapped ketat:
+
+### 1. Zero Live API Call pada Dashboard Rendering
+- Data CISA ICS advisories di-prefetch menggunakan script `python core/threat_intel/fetch_advisories.py`.
+- Hasil sinkronisasi disimpan di `data/threat_intel/cisa_cache.json`.
+- Dashboard **100% membaca data dari cache lokal**, sehingga rendering UI instan dan bebas risiko kegagalan koneksi internet saat demo/operasional.
+
+### 2. "Code IS the Documentation" — Code-Level Enforcement
+- Setiap fitur yang berpotensi mengirim metadata ke luar jaringan (seperti Shodan exposure check) diproteksi secara langsung di level kode:
+  ```python
+  if self.mode == "air-gapped":
+      raise FeatureDisabledError(
+          "Shodan check disabled in air-gapped mode — "
+          "querying external API violates zero-egress principle"
+      )
+  ```
+- Pembuktian air-gapped tidak hanya mengandalkan teks dokumen/README, melainkan diuji dan ditegakkan langsung oleh mesin Python interpreter (*Exception handling*).
 
 ---
 

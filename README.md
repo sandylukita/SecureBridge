@@ -3,7 +3,7 @@
 
 > **Built by:** Sandy Lukita | PT Optima Sarana Instrument  
 > **Status:** Active Development — Live Deployment Ready  
-> **Version:** 1.6.0  
+> **Version:** 1.7.0  
 
 ---
 
@@ -153,7 +153,23 @@ Refresh #3 (8,031 events)   → score only 14 new events         (<0.01s)
 #  and IBM QRadar to handle high event volumes without sacrificing completeness."
 ```
 
-### 9. IEC 62443-3-2 Formal Risk Register & SUC Scope Definition
+### 9. Public OT Threat Intelligence Aggregator (`ThreatIntelFeed`)
+
+SecureBridge integrates public OT threat intelligence without compromising air-gapped security:
+
+- **CISA ICS-CERT Feed**: Automatically correlates passively discovered assets (Schneider Electric, Rockwell Automation, Siemens S7) against official US CISA advisories.
+- **Offline Pre-Fetch (`fetch_advisories.py`)**: Pre-populates `data/threat_intel/cisa_cache.json` so dashboard rendering uses zero live API calls during demos or air-gapped operation.
+- **Code-Level Air-Gapped Guard Rail**: Features that require internet egress (such as Shodan exposure checks) raise `FeatureDisabledError` in air-gapped mode. Security claims are enforced directly in code (`code IS the documentation`).
+
+```python
+# Interview answer:
+# "SecureBridge does not attempt to replicate Dragos's internal threat research team.
+#  Instead, we aggregate public CISA ICS advisories and match them against discovered assets.
+#  To maintain our zero-egress guarantee, advisories are served from a local cache, and
+#  any feature requiring cloud egress explicitly raises FeatureDisabledError in air-gapped mode."
+```
+
+### 10. IEC 62443-3-2 Formal Risk Register & SUC Scope Definition
 Audit-ready compliance reporting:
 - **System Under Consideration (SUC)** explicit boundary definition
 - **Formal Risk Register**: `RS1`, `RS2`, `RS3`... numbering system for full traceability
@@ -195,6 +211,10 @@ SecureBridge/
 │   ├── detection/
 │   │   └── model.py           # Isolation Forest + EventWindow + IncrementalScorer
 │   │
+│   ├── threat_intel/
+│   │   ├── feed_aggregator.py # ThreatIntelFeed + CISA matcher + FeatureDisabledError
+│   │   └── fetch_advisories.py# Pre-fetch script & bundled offline demo cache
+│   │
 │   └── advisor/
 │       └── claude.py          # Hybrid ThreatAdvisor (Gemini + Claude + Ollama + Tiering)
 │
@@ -215,6 +235,7 @@ SecureBridge/
 │
 └── data/
     ├── models/                # Trained Isolation Forest (pkl) + score_cache.pkl
+    ├── threat_intel/          # cisa_cache.json (pre-fetched CISA advisories)
     ├── reports/               # Generated PDF reports
     └── logs/                  # OT event CSV (ML training data)
 ```
@@ -270,6 +291,9 @@ pip install -r requirements.txt
 cp .env.example .env
 # Set GEMINI_API_KEY=your-api-key-here in .env for free sub-second AI analysis
 
+# Pre-fetch CISA advisories (runs offline from local cache during demo)
+python core/threat_intel/fetch_advisories.py
+
 # Lab Mode — Run Dashboard
 streamlit run dashboard/app.py
 
@@ -293,6 +317,8 @@ python core/capture/monitor.py config/live.yaml
 | **Protocol Parsers** | pymodbus + custom Modbus/EtherNet-IP/BACnet parsers |
 | **ML Detection** | scikit-learn — Isolation Forest (19 features, training-stats normalization) |
 | **ML Scoring** | `IncrementalScorer` — hash-based cache, O(N_new) per refresh, auto cache invalidation |
+| **Threat Intel** | `ThreatIntelFeed` — CISA ICS-CERT RSS feed, offline cache, asset vendor matching |
+| **Air-Gapped Control** | Code-level `FeatureDisabledError` guard rails for zero-egress enforcement |
 | **LLM — Cloud Showcase** | Google Gemini API (`gemini-flash-latest`) — Free tier, sub-second |
 | **LLM — Cloud High-End** | Anthropic Claude API (`claude-sonnet-4-6`) |
 | **LLM — Local Air-Gapped**| Ollama (`llama3.1` / `qwen2.5`) — zero data egress |
