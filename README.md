@@ -128,6 +128,13 @@ Visual physical process monitoring:
 - **PLC-03**: Valve Line Pressure (BAR)
 - Instant visual alarms: **`"VALVE OVERRIDE DETECTED"`** on unauthorized Modbus Write commands.
 
+### 7. Deterministic SOC Visualizations (Zero-Hallucination)
+To ensure absolute credibility during incident response, SecureBridge limits SOC visualizations strictly to data derived passively from the network, eliminating AI hallucination risks:
+- **Incident Timeline**: 100% data-driven raw OT event timeline sorted by anomaly score.
+- **Communication Matrix**: Aggregated IP-to-IP traffic heatmap based purely on logged packets.
+- **Fact-Based Asset Details**: Shows vendor (OUI), protocol, and Purdue level. Deliberately omits firmware/OS details to prevent unverified claims without active probing.
+- **Static MITRE ATT&CK Mapping**: Deterministic mapping of Modbus function codes to ICS ATT&CK techniques (e.g., FC 16 → T0836) without LLM guesswork.
+
 ### 8. Incremental Scoring with Cache — SIEM-Grade Performance
 
 SecureBridge uses an **`IncrementalScorer`** for dashboard refresh efficiency:
