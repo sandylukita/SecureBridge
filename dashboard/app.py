@@ -509,6 +509,24 @@ logger -t SECUREBRIDGE "CONTAINMENT: Blocked unauthorized Modbus FC{alert.get('f
     else:
         st.success("✅ No active alerts above threshold. Network operations normal.")
 
+    st.markdown("---")
+    st.markdown("#### 📜 Incident Timeline (Raw OT Events)")
+    if has_data:
+        timeline_df = df.sort_values("timestamp", ascending=False)[
+            ["timestamp", "device_id", "src_ip", "dst_ip", "protocol", "function_name", "anomaly_score", "severity"]
+        ].head(100)
+        
+        st.dataframe(
+            timeline_df,
+            column_config={
+                "timestamp": st.column_config.DatetimeColumn("Time", format="D MMM YYYY, HH:mm:ss"),
+                "anomaly_score": st.column_config.ProgressColumn("Anomaly Score", min_value=0, max_value=100),
+                "severity": "Severity",
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
 # ─────────────────────────────────────────────────────────
 # TAB 2: PURDUE NETWORK TOPOLOGY VISUALIZER
 # ─────────────────────────────────────────────────────────
@@ -549,6 +567,27 @@ with tab2:
         )
         st.plotly_chart(fig_topo, use_container_width=True)
 
+    if has_data:
+        st.markdown("#### 🔗 Traffic Communication Matrix")
+        st.caption("Aggregated communication volume between OT assets based on passive packet capture.")
+        comm_matrix = pd.crosstab(df["src_ip"], df["dst_ip"])
+        if not comm_matrix.empty:
+            fig_matrix = px.imshow(
+                comm_matrix, 
+                labels=dict(x="Destination IP", y="Source IP", color="Packet Count"),
+                x=comm_matrix.columns, 
+                y=comm_matrix.index,
+                color_continuous_scale="Blues"
+            )
+            fig_matrix.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(15,23,42,0.8)",
+                font_color="#e0e6ed",
+                margin=dict(l=20, r=20, t=20, b=20),
+                height=400
+            )
+            st.plotly_chart(fig_matrix, use_container_width=True)
+
     st.markdown("#### 📋 Passively Discovered Asset Inventory")
     assets_table = [
         {
@@ -578,18 +617,32 @@ with tab2:
     else:
         st.warning("⚠️ CISA cache not found. Run: `python core/threat_intel/fetch_advisories.py`")
 
-    # Show advisories per seeded asset
-    for asset in list(asset_registry.assets.values())[:6]:
+    # Show asset details and advisories per asset
+    for asset in list(asset_registry.assets.values())[:10]:
         intel = threat_intel.get_asset_intel(asset.ip, asset.vendor)
-        if intel["total_advisories"] == 0:
-            continue
         crit_n = intel["critical_advisories"]
         high_n = intel["high_advisories"]
-        badge  = "🔴 CRITICAL" if crit_n > 0 else "🟠 HIGH" if high_n > 0 else "🟡 MEDIUM"
+        badge  = "🔴 CRITICAL" if crit_n > 0 else "🟠 HIGH" if high_n > 0 else "🟢 NORMAL"
+        
         with st.expander(
-            f"{badge} {asset.name} ({asset.vendor}) — "
-            f"{intel['total_advisories']} active advisories"
+            f"{badge} {asset.ip} — {asset.name} ({asset.asset_type})"
         ):
+            st.markdown(f"**Passive Profile:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write(f"- **Vendor:** {asset.vendor} (via MAC OUI)")
+                st.write(f"- **Protocol:** {asset.protocol}")
+            with col2:
+                st.write(f"- **Purdue Level:** {asset.purdue_level}")
+                st.write(f"- **Status:** {asset.status}")
+            with col3:
+                st.write(f"- **Event Count:** {asset.event_count}")
+                st.write(f"- **Max Score:** {asset.max_score:.1f}")
+                
+            st.caption("_Note: Firmware version and OS are deliberately omitted as passive listening cannot deterministically extract them without active DPI probing._")
+
+            if intel["total_advisories"] > 0:
+                st.markdown(f"**Threat Intel ({intel['total_advisories']} active advisories):**")
             for adv in intel["latest_advisories"]:
                 cvss = adv.get("cvss")
                 cvss_str = f"CVSS {cvss:.1f}" if cvss else "CVSS N/A"

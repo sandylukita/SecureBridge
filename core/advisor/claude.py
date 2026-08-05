@@ -134,7 +134,6 @@ Respond ONLY with valid JSON in this exact format:
   "data_integrity_risk": true,
   "escalate_immediately": true,
   "escalation_reason": "Why escalation is or is not needed",
-  "mitre_attack_ics": "MITRE ATT&CK for ICS T0xxx technique ONLY — use ICS matrix (https://attack.mitre.org/matrices/ics/). Examples: T0836 Modify Parameter, T0855 Unauthorized Command Message, T0814 Denial of Control, T0846 Remote System Discovery. Use null if genuinely not applicable. NEVER use Enterprise ATT&CK TAxxx tactic codes.",
   "analyst_notes": "Additional context or recommendations"
 }}"""
 
@@ -596,11 +595,26 @@ class ThreatAdvisor:
         """Stamp common fields onto a successful LLM response."""
         analysis["analyzed_at"] = datetime.now().isoformat()
         analysis["success"]     = True
+        # Inject deterministic MITRE Mapping
+        analysis["mitre_attack_ics"] = self._map_mitre_ics(anomaly.get("function_code", 0), anomaly.get("is_write", False))
         # Ensure schema completeness — fill missing keys with None
-        for key in ("mitre_attack_ics", "analyst_notes",
-                    "operational_impact", "data_integrity_risk"):
+        for key in ("analyst_notes", "operational_impact", "data_integrity_risk"):
             analysis.setdefault(key, None)
         return analysis
+
+    def _map_mitre_ics(self, fc: int, is_write: bool) -> str:
+        """Deterministic MITRE ATT&CK for ICS Mapping."""
+        if fc == 43:
+            return "T0846 — Remote System Discovery"
+        elif fc in (15, 16):
+            return "T0836 — Modify Parameter"
+        elif fc in (5, 6):
+            return "T0855 — Unauthorized Command Message"
+        elif fc == 90:
+            return "T0843 — Program Upload"
+        elif is_write:
+            return "T0836 — Modify Parameter"
+        return "None (Routine Polling)"
 
     # ── Rule-based fallback (no LLM required) ─────────────────
 
@@ -711,11 +725,7 @@ class ThreatAdvisor:
                 "Score or command type requires immediate human review"
                 if escalate else "Monitor and review at next opportunity"
             ),
-            "mitre_attack_ics": (
-                "T0846 — Remote System Discovery" if fc == 43
-                else "T0836 — Modify Parameter"    if is_write
-                else None
-            ),
+            "mitre_attack_ics": self._map_mitre_ics(fc, is_write),
             "analyst_notes": (
                 "Rule-based fallback — configure ANTHROPIC_API_KEY "
                 "or start Ollama (ollama serve) for full LLM analysis"
