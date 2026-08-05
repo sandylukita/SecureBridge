@@ -32,7 +32,7 @@ without enterprise budgets.
                                        delta_time · fc_risk · unknown_ip
                                                     │
                                    [Hybrid LLM Response Tiering]
-                             Gemini API / Claude API / Local Ollama (llama3.1)
+                             Groq API / Gemini / Claude / Local Ollama
                              "Security Guard vs Detective" Efficiency Model
                                                     │
              ┌──────────────────────────────────────┼──────────────────────────────────────┐
@@ -112,7 +112,7 @@ Four flexible LLM backends with intelligent resource tiering (`should_invoke_llm
 |---|---|---|---|
 | **LOW (Routine Noise)** | Score < 60 | Isolation Forest ML + Rule Engine | Instant filter; preserves edge CPU/RAM |
 | **MEDIUM** | Score >= 70 or `is_write=True` | Conditional LLM | Selective AI investigation |
-| **HIGH / CRITICAL** | Critical Threat | Full LLM (Gemini / Claude / Ollama) | Full Threat Reasoning & Playbook |
+| **HIGH / CRITICAL** | Critical Threat | Full LLM (Groq / Gemini / Claude / Ollama) | Full Threat Reasoning & Playbook |
 
 ```python
 # Interview answer:
@@ -202,6 +202,32 @@ SecureBridge has been **100% verified** against 7 critical real-world OT securit
 
 ---
 
+## Design Decisions
+
+### Evolving from Event-based to Incident-based AI Analysis (V1 → V2)
+
+The initial version of SecureBridge (V1) implemented a straightforward event-based AI analysis pattern:
+```
+Packet → Alert → LLM
+```
+While this worked well for isolated tests, it introduced an `O(N)` API call complexity. If an attacker launched a sequence of 50 Modbus write commands, the dashboard would make 50 sequential calls to the LLM backend. This pattern suffered from rate limits (e.g., triggering HTTP 429 Too Many Requests on free-tier APIs) and failed to provide the LLM with the sequence-level context necessary for root cause analysis.
+
+**The V2 Architecture Shift**
+SecureBridge V2 transitions the AI backend into an `O(1)` Incident-Based Batching pattern:
+```
+Packet → Alert → Incident Builder → Incident Summary → LLM
+```
+
+Instead of looping through raw alerts, the **IncidentAnalyst** groups anomalies into highly contextual **Incidents** using an extensible `IncidentStrategy` (defaulting to grouping by the Asset Pair: `Source IP` + `Target IP`). 
+It then compresses identical sequence steps (e.g., "30x Modbus Read") into an `Incident Summary` before passing it to the LLM. 
+
+This DDD (Domain-Driven Design) shift achieves three critical improvements:
+1. **Zero Rate Limiting:** Batches all related alerts into a single API request, entirely bypassing Gemini/Azure free-tier rate limits.
+2. **Context Enrichment:** The LLM now analyzes the *sequence* of an attack rather than isolated packets, drastically reducing hallucination and improving mitigation playbooks.
+3. **SIEM-grade Caching:** Responses are now cached based on an `Incident ID` signature, ensuring deterministic, ultra-fast dashboard rendering during client presentations.
+
+---
+
 ## Architecture
 
 ```
@@ -223,7 +249,7 @@ SecureBridge/
 │   │   └── fetch_advisories.py# Pre-fetch script & bundled offline demo cache
 │   │
 │   └── advisor/
-│       └── claude.py          # Hybrid ThreatAdvisor (Gemini + Claude + Ollama + Tiering)
+│       └── incident_analyst.py# Hybrid ThreatAdvisor (Groq + Gemini + Claude + Ollama)
 │
 ├── dashboard/
 │   └── app.py                 # Cyber SOC Command Center UI (4 Interactive Tabs)
@@ -276,8 +302,8 @@ simulator:
   enabled: true
   plc_count: 3              # 3 simulated PLCs with realistic Modbus traffic
 llm:
-  mode: auto                # Auto routes: Gemini API -> Claude -> Ollama -> Rules
-  gemini_model: gemini-flash-latest
+  provider: auto            # Auto routes: Groq -> Gemini -> Claude -> Ollama -> Rules
+  groq_model: llama-3.3-70b-versatile
 ```
 
 ---
@@ -296,7 +322,7 @@ pip install -r requirements.txt
 
 # Configure Environment Variables (.env)
 cp .env.example .env
-# Set GEMINI_API_KEY=your-api-key-here in .env for free sub-second AI analysis
+# Set GROQ_API_KEY=your-api-key-here in .env for free sub-second AI analysis
 
 # Pre-fetch CISA advisories (runs offline from local cache during demo)
 python core/threat_intel/fetch_advisories.py
@@ -326,7 +352,7 @@ python core/capture/monitor.py config/live.yaml
 | **ML Scoring** | `IncrementalScorer` — hash-based cache, O(N_new) per refresh, auto cache invalidation |
 | **Threat Intel** | `ThreatIntelFeed` — CISA ICS-CERT RSS feed, offline cache, asset vendor matching |
 | **Air-Gapped Control** | Code-level `FeatureDisabledError` guard rails for zero-egress enforcement |
-| **LLM — Cloud Showcase** | Google Gemini API (`gemini-flash-latest`) — Free tier, sub-second |
+| **LLM — Cloud Showcase** | Groq API (`llama-3.3-70b`) / Google Gemini API (`gemini-flash-latest`) — Free tier, sub-second |
 | **LLM — Cloud High-End** | Anthropic Claude API (`claude-sonnet-4-6`) |
 | **LLM — Local Air-Gapped**| Ollama (`llama3.1` / `qwen2.5`) — zero data egress |
 | **LLM Tiering** | `should_invoke_llm` Security Guard vs Detective Model |

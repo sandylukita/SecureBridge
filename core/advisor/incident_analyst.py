@@ -1,21 +1,24 @@
 """
 SecureBridge — Hybrid LLM Threat Advisor
 =========================================
-Provides intelligent OT/ICS threat analysis with two backends:
+Provides intelligent OT/ICS threat analysis with multiple backends:
 
+  Groq API     (cloud)    — default, lightning fast, Llama 3 models
   Claude API   (cloud)    — highest quality reasoning, CRITICAL alerts
+  Gemini API   (cloud)    — free tier, fast
   Ollama local (on-prem)  — air-gapped environments, zero data egress
 
-Backend selection is controlled by config.llm.mode:
+Backend selection is controlled by config.llm.provider:
 
-  auto       — CRITICAL severity → Claude; routine → Ollama if available
+  groq       — Always Groq API (requires GROQ_API_KEY)
+  auto       — Groq/Gemini/Claude if available, fallback to Ollama/Rule engine
   claude     — Always Claude API (requires ANTHROPIC_API_KEY)
   ollama     — Always local Ollama (air-gapped / offline)
   air-gapped — Alias for ollama; makes intent explicit in YAML config
 
 Both backends use the identical prompt schema and return the same JSON
 structure — the dashboard and alerting layer never need to know which
-backend was used. A model/mode field in the response identifies the source.
+backend was used. A model/provider field in the response identifies the source.
 
 Output schema (identical across all backends):
   threat_summary       : plain-English one-liner for management
@@ -30,8 +33,10 @@ Output schema (identical across all backends):
   mitre_attack_ics     : MITRE ATT&CK for ICS technique or null
   analyst_notes        : additional context
   model                : which backend/model was used
-  mode                 : cloud / air-gapped-local / rule-based
+  provider             : cloud / air-gapped-local / rule-based
   success              : bool
+  latency_sec          : float (time taken for inference)
+  request_id           : string (debugging context)
 """
 
 import os
@@ -39,6 +44,7 @@ import sys
 import json
 import logging
 import anthropic
+import time
 from datetime import datetime
 
 try:
@@ -94,41 +100,37 @@ technique codes (Txxxx four-digit without leading zero). The domains are
 distinct: ICS ATT&CK covers OT/SCADA/ICS environments exclusively."""
 
 
-ANALYSIS_PROMPT = """Analyze this OT/ICS security anomaly and provide
-a structured assessment.
+INCIDENT_ANALYSIS_PROMPT = """Analyze this OT/ICS security incident and provide
+a structured assessment. An incident consists of a sequence of related alerts
+grouped by the source and destination asset.
 
-ANOMALY DATA:
-- Device: {device_id}
-- Protocol: {protocol}
-- Event Type: {event_type}
-- Anomaly Score: {anomaly_score}/100
-- Severity: {severity}
-- Source IP: {src_ip}
-- Destination IP: {dst_ip}
-- Function Code: {function_code} ({function_name})
-- Register Address: {register_address}
-- Is Write Operation: {is_write}
-- Timestamp: {timestamp}
-- Additional Context: {context}
+INCIDENT SUMMARY:
+- Incident ID: {incident_id}
+- Target Asset (Destination): {dst_ip}
+- Source Asset (Attacker): {src_ip}
+- Total Alerts in Window: {alert_count}
+- Highest Severity: {severity} (Score: {max_score}/100)
+- Protocol(s): {protocols}
+
+EVENT SEQUENCE (Compressed):
+{compressed_sequence}
 
 Respond ONLY with valid JSON in this exact format:
 {{
-  "threat_summary": "One sentence — what happened in plain English",
-  "threat_detail": "2-3 sentences — technical explanation for security team",
+  "threat_summary": "One sentence — what happened in plain English across this incident",
+  "threat_detail": "2-3 sentences — technical explanation of the sequence for security team",
   "possible_causes": [
     {{"rank": 1, "cause": "description", "likelihood": "65%", "type": "malicious/operational/technical"}},
-    {{"rank": 2, "cause": "description", "likelihood": "25%", "type": "malicious/operational/technical"}},
-    {{"rank": 3, "cause": "description", "likelihood": "10%", "type": "malicious/operational/technical"}}
+    {{"rank": 2, "cause": "description", "likelihood": "25%", "type": "malicious/operational/technical"}}
   ],
   "immediate_actions": [
     "Action 1 — specific and actionable",
-    "Action 2 — specific and actionable",
-    "Action 3 — specific and actionable"
+    "Action 2 — specific and actionable"
   ],
   "iec62443_reference": {{
     "requirement": "SR X.X",
     "title": "Requirement title",
-    "description": "How this anomaly relates to this requirement"
+    "description": "How this incident relates to this requirement"
   }},
   "operational_impact": "low/medium/high/critical",
   "data_integrity_risk": true,
@@ -195,24 +197,112 @@ def _build_context(anomaly: dict) -> str:
     return "; ".join(ctx) if ctx else "Standard OT event"
 
 
-def _build_prompt(anomaly: dict) -> str:
-    """Render ANALYSIS_PROMPT with anomaly data."""
-    return ANALYSIS_PROMPT.format(
-        device_id=anomaly.get("device_id", "Unknown"),
-        protocol=anomaly.get("protocol", "Modbus TCP"),
-        event_type=anomaly.get("event_type", "Unknown"),
-        anomaly_score=anomaly.get("anomaly_score", 0),
-        severity=anomaly.get("severity", "UNKNOWN"),
-        src_ip=anomaly.get("src_ip", "Unknown"),
-        dst_ip=anomaly.get("dst_ip", "Unknown"),
-        function_code=anomaly.get("function_code", ""),
-        function_name=anomaly.get("function_name", ""),
-        register_address=anomaly.get("register_address", ""),
-        is_write=anomaly.get("is_write", False),
-        timestamp=anomaly.get("timestamp", datetime.now().isoformat()),
-        context=_build_context(anomaly),
+def _build_incident_summary(incident: dict) -> str:
+    """Compress a sequence of alerts into a text summary to save LLM tokens."""
+    alerts = incident.get("alerts", [])
+    if not alerts:
+        return "No alerts found."
+
+    summary_lines = []
+    current_batch = None
+    count = 0
+
+    for alt in alerts:
+        fc = alt.get("function_code", "N/A")
+        fc_name = alt.get("function_name", "Unknown")
+        is_write = alt.get("is_write", False)
+        
+        signature = f"FC{fc} ({fc_name}) | Write: {is_write}"
+        
+        if current_batch == signature:
+            count += 1
+        else:
+            if current_batch is not None:
+                summary_lines.append(f"- Repeated {count}x: {current_batch}")
+            current_batch = signature
+            count = 1
+
+    if current_batch is not None:
+        summary_lines.append(f"- Repeated {count}x: {current_batch}")
+
+    return "\n".join(summary_lines)
+
+def _build_incident_prompt(incident: dict) -> str:
+    """Render INCIDENT_ANALYSIS_PROMPT with compressed incident data."""
+    alerts = incident.get("alerts", [])
+    protocols = list(set(alt.get("protocol", "Modbus TCP") for alt in alerts))
+    
+    return INCIDENT_ANALYSIS_PROMPT.format(
+        incident_id=incident.get("incident_id", "Unknown"),
+        dst_ip=incident.get("target_ip", "Unknown"),
+        src_ip=incident.get("source_ip", "Unknown"),
+        alert_count=incident.get("alert_count", 0),
+        severity=incident.get("severity", "UNKNOWN"),
+        max_score=incident.get("max_score", 0.0),
+        protocols=", ".join(protocols),
+        compressed_sequence=_build_incident_summary(incident)
     )
 
+# ─────────────────────────────────────────────────────────
+# Groq Backend
+# ─────────────────────────────────────────────────────────
+
+class GroqBackend:
+    """
+    Groq API backend.
+    Requires GROQ_API_KEY environment variable.
+    Provides sub-second inference using Llama 3 models on LPUs.
+    """
+
+    def __init__(self, model: str = "llama-3.3-70b-versatile", max_tokens: int = 1500, timeout: int = 8):
+        self.model      = model
+        self.max_tokens = max_tokens
+        self.timeout    = timeout
+        self.client     = None
+        self.available  = False
+        self._init()
+
+    def _init(self):
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            logger.warning(
+                "GROQ_API_KEY not set — Groq backend unavailable. "
+            )
+            return
+        try:
+            from groq import Groq
+            self.client    = Groq(api_key=api_key, timeout=self.timeout, max_retries=0)
+            self.available = True
+            logger.info(f"Groq backend ready — model: {self.model}")
+        except Exception as exc:
+            logger.warning(f"Groq init failed: {exc}")
+
+    def analyze_incident(self, incident: dict) -> dict:
+        if not self.client:
+            raise RuntimeError("Groq client not initialized")
+
+        prompt   = _build_incident_prompt(incident)
+        
+        t0 = time.perf_counter()
+        response = self.client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        t1 = time.perf_counter()
+        
+        raw      = response.choices[0].message.content
+        analysis = _clean_json(raw)
+        analysis["model"] = f"groq/{self.model}"
+        analysis["provider"] = "groq"
+        analysis["latency_sec"] = round(t1 - t0, 2)
+        analysis["request_id"] = getattr(response, 'id', 'unknown')
+        return analysis
 
 # ─────────────────────────────────────────────────────────
 # Claude Backend
@@ -225,9 +315,10 @@ class ClaudeBackend:
     Provides highest-quality threat reasoning for complex incidents.
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-6", max_tokens: int = 1500):
+    def __init__(self, model: str = "claude-sonnet-4-6", max_tokens: int = 1500, timeout: int = 8):
         self.model      = model
         self.max_tokens = max_tokens
+        self.timeout    = timeout
         self.client     = None
         self.available  = False
         self._init()
@@ -237,31 +328,36 @@ class ClaudeBackend:
         if not api_key:
             logger.warning(
                 "ANTHROPIC_API_KEY not set — Claude backend unavailable. "
-                "Set env var or use ollama/air-gapped mode."
             )
             return
         try:
-            self.client    = anthropic.Anthropic(api_key=api_key, max_retries=0)
+            self.client    = anthropic.Anthropic(api_key=api_key, max_retries=0, timeout=self.timeout)
             self.available = True
             logger.info(f"Claude backend ready — model: {self.model}")
         except Exception as exc:
             logger.warning(f"Claude init failed: {exc}")
 
-    def analyze(self, anomaly: dict) -> dict:
+    def analyze_incident(self, incident: dict) -> dict:
         if not self.client:
             raise RuntimeError("Claude client not initialized")
 
-        prompt   = _build_prompt(anomaly)
+        prompt   = _build_incident_prompt(incident)
+        
+        t0 = time.perf_counter()
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        t1 = time.perf_counter()
+        
         raw      = response.content[0].text
         analysis = _clean_json(raw)
         analysis["model"] = f"claude/{self.model}"
-        analysis["mode"]  = "cloud"
+        analysis["provider"]  = "claude"
+        analysis["latency_sec"] = round(t1 - t0, 2)
+        analysis["request_id"] = getattr(response, 'id', 'unknown')
         return analysis
 
 
@@ -273,12 +369,11 @@ class GeminiBackend:
     """
     Google Gemini API backend.
     Requires GEMINI_API_KEY environment variable.
-    Free tier support (15 RPM free) & sub-second inference.
-    Ideal for cloud showcase & demo labs without heavy GPU/RAM cost.
     """
 
-    def __init__(self, model: str = "gemini-flash-latest"):
+    def __init__(self, model: str = "gemini-flash-latest", timeout: int = 8):
         self.model     = model
+        self.timeout   = timeout
         self.client    = None
         self.available = False
         self._init()
@@ -288,7 +383,6 @@ class GeminiBackend:
         if not api_key:
             logger.warning(
                 "GEMINI_API_KEY not set — Gemini backend unavailable. "
-                "Set GEMINI_API_KEY env var for free-tier cloud LLM mode."
             )
             return
         try:
@@ -303,24 +397,29 @@ class GeminiBackend:
         except Exception as exc:
             logger.warning(f"Gemini init failed: {exc}")
 
-    def analyze(self, anomaly: dict) -> dict:
+    def analyze_incident(self, incident: dict) -> dict:
         if not self.client:
             raise RuntimeError("Gemini client not initialized")
 
-        prompt = _build_prompt(anomaly)
+        prompt = _build_incident_prompt(incident)
         generation_config = {"response_mime_type": "application/json"}
         
         from google.api_core import retry
-        # Disable retry so Streamlit doesn't hang indefinitely on 429 errors
+        
+        t0 = time.perf_counter()
         response = self.client.generate_content(
             prompt,
             generation_config=generation_config,
-            request_options={"retry": retry.Retry(initial=0, maximum=0, timeout=10.0)}
+            request_options={"retry": retry.Retry(initial=0, maximum=0, timeout=float(self.timeout))}
         )
+        t1 = time.perf_counter()
+        
         raw = response.text
         analysis = _clean_json(raw)
         analysis["model"] = f"gemini/{self.model}"
-        analysis["mode"]  = "cloud-free-tier"
+        analysis["provider"]  = "gemini"
+        analysis["latency_sec"] = round(t1 - t0, 2)
+        analysis["request_id"] = 'gemini-req'
         return analysis
 
 
@@ -331,24 +430,17 @@ class GeminiBackend:
 class OllamaBackend:
     """
     Local Ollama backend — air-gapped / offline mode.
-
-    Zero data egress: all inference runs on the local machine.
-    Recommended models (in order of JSON output quality):
-      qwen2.5:14b  — best structured JSON, needs ~10GB RAM
-      llama3.1:8b  — good balance, needs ~6GB RAM
-      llama3.1     — default tag (usually 8b)
-      mistral:7b   — fast, decent quality
-
-    Sandy's 32GB RAM can comfortably run qwen2.5:14b.
     """
 
     def __init__(
         self,
         model: str = "llama3.1",
         host: str = "http://localhost:11434",
+        timeout: int = 15,
     ):
         self.model     = model
         self.host      = host
+        self.timeout   = timeout
         self.client    = None
         self.available = False
         self._init()
@@ -358,9 +450,10 @@ class OllamaBackend:
             import ollama as _ollama
             # Override host if non-default
             if self.host != "http://localhost:11434":
-                self.client = _ollama.Client(host=self.host)
+                self.client = _ollama.Client(host=self.host, timeout=self.timeout)
             else:
-                self.client = _ollama
+                self.client = _ollama.Client(host=self.host, timeout=self.timeout)
+                
             # Quick connectivity check — list models
             models = self.client.list()
             available_tags = [m.model for m in models.models]
@@ -386,16 +479,17 @@ class OllamaBackend:
                 f"Is Ollama running? Start with: ollama serve"
             )
 
-    def analyze(self, anomaly: dict) -> dict:
+    def analyze_incident(self, incident: dict) -> dict:
         if not self.client:
             raise RuntimeError("Ollama client not initialized")
 
         # Combine system + user prompt (Ollama supports system role)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": _build_prompt(anomaly)},
+            {"role": "user",   "content": _build_incident_prompt(incident)},
         ]
 
+        t0 = time.perf_counter()
         try:
             # format='json' enforces JSON output mode where supported
             response = self.client.chat(
@@ -411,10 +505,13 @@ class OllamaBackend:
                 messages=messages,
             )
             raw = response.message.content
+        t1 = time.perf_counter()
 
         analysis = _clean_json(raw)
         analysis["model"] = f"ollama/{self.model}"
-        analysis["mode"]  = "air-gapped-local"
+        analysis["provider"]  = "ollama"
+        analysis["latency_sec"] = round(t1 - t0, 2)
+        analysis["request_id"] = "local-inference"
         return analysis
 
 
@@ -422,67 +519,82 @@ class OllamaBackend:
 # Hybrid ThreatAdvisor
 # ─────────────────────────────────────────────────────────
 
-class ThreatAdvisor:
+class IncidentAnalyst:
     """
-    Hybrid LLM threat advisor — Gemini API + Claude API + Ollama local + rule-based fallback.
+    Hybrid LLM threat advisor — Groq API + Gemini API + Claude API + Ollama local + rule-based fallback.
 
-    Mode routing:
+    Provider routing:
 
-      auto       → Gemini (if available, free & fast) → Claude → Ollama → rule-based
+      groq       → Groq API → fallbacks
+      auto       → Groq (if available, free & fast) → Gemini → Claude → Ollama → rule-based
       gemini     → Gemini API → fallbacks
       claude     → Claude API → fallbacks
       ollama     → Ollama local → fallbacks
       air-gapped → Ollama local → rule-based (never uses cloud APIs)
 
-    The `model` and `mode` fields in the returned dict identify
+    The `model` and `provider` fields in the returned dict identify
     which backend actually responded.
     """
 
     def __init__(
         self,
-        mode: str = "auto",
+        provider: str = "groq",
+        groq_model: str = "llama-3.3-70b-versatile",
         gemini_model: str = "gemini-flash-latest",
         ollama_model: str = "llama3.1",
         ollama_host: str = "http://localhost:11434",
         claude_model: str = "claude-sonnet-4-6",
         max_tokens: int = 1500,
+        api_timeout: int = 8,
     ):
-        self.mode = mode
+        self.provider = provider
+        
+        self._groq = GroqBackend(
+            model=groq_model,
+            max_tokens=max_tokens,
+            timeout=api_timeout
+        )
 
         self._claude = ClaudeBackend(
             model=claude_model,
             max_tokens=max_tokens,
+            timeout=api_timeout
         )
         self._gemini = GeminiBackend(
             model=gemini_model,
+            timeout=api_timeout
         )
-        # Don't initialise Ollama in pure cloud modes (claude/gemini)
-        if mode not in ("claude", "gemini"):
+        
+        # Don't initialise Ollama in pure cloud modes (unless auto)
+        if provider not in ("claude", "gemini", "groq"):
             self._ollama = OllamaBackend(
                 model=ollama_model,
                 host=ollama_host,
+                timeout=api_timeout*2 # Give local model more time
             )
         else:
             self._ollama = None
 
         logger.info(
-            f"ThreatAdvisor ready — mode: {mode} | "
+            f"IncidentAnalyst ready — provider: {provider} | "
+            f"groq: {'OK' if self._groq.available else 'unavailable'} | "
             f"gemini: {'OK' if self._gemini.available else 'unavailable'} | "
             f"claude: {'OK' if self._claude.available else 'unavailable'} | "
             f"ollama: {'OK' if self._ollama and self._ollama.available else 'unavailable'}"
         )
 
-    def should_invoke_llm(self, anomaly: dict) -> bool:
+    def should_invoke_llm(self, incident: dict) -> bool:
         """
         Air-Gapped Response Strategy (Security Guard vs Detective Tiering):
         - CRITICAL / HIGH severity: Always invoke LLM for full threat reasoning.
-        - MEDIUM severity: Invoke LLM if anomaly_score >= 70 or is_write is True.
-        - LOW severity / background noise: Use rule-based engine directly to preserve
-          edge CPU/RAM resources and avoid LLM inference fatigue.
+        - MEDIUM severity: Invoke LLM if max score >= 70 or has write.
+        - LOW severity / background noise: Use rule-based engine directly.
         """
-        severity = anomaly.get("severity", "LOW")
-        score = anomaly.get("anomaly_score", 0.0)
-        is_write = anomaly.get("is_write", False)
+        severity = incident.get("severity", "LOW")
+        score = incident.get("max_score", 0.0)
+        
+        # Check if any alert in incident is a write
+        is_write = any(a.get("is_write", False) for a in incident.get("alerts", []))
 
         if severity in ("CRITICAL", "HIGH"):
             return True
@@ -492,113 +604,145 @@ class ThreatAdvisor:
 
     # ── Public API ────────────────────────────────────────────
 
-    def analyze(self, anomaly: dict) -> dict:
+    def analyze_incident(self, incident: dict) -> dict:
         """
-        Analyze an OT anomaly using the configured LLM backend.
+        Analyze an OT incident using the configured LLM backend.
 
         Returns a dict with threat_summary, possible_causes,
         immediate_actions, iec62443_reference, and more.
         See module docstring for full output schema.
         """
-        severity = anomaly.get("severity", "LOW")
+        severity = incident.get("severity", "LOW")
 
         # Response Tiering Check: Preserve LLM resources for high-value threats
-        if not self.should_invoke_llm(anomaly):
+        if not self.should_invoke_llm(incident):
             logger.info(
-                f"[Tiering Filter] Event {anomaly.get('device_id')} ({severity}) "
+                f"[Tiering Filter] Incident {incident.get('incident_id')} ({severity}) "
                 f"handled by ML baseline — LLM skipped to preserve edge CPU"
             )
-            return self._fallback_analysis(anomaly)
+            return self._fallback_analysis(incident)
 
         try:
-            if self.mode == "gemini":
-                return self._try_gemini(anomaly)
+            if self.provider == "groq":
+                return self._try_groq(incident)
 
-            elif self.mode in ("ollama", "air-gapped"):
-                return self._try_ollama(anomaly)
+            elif self.provider == "gemini":
+                return self._try_gemini(incident)
 
-            elif self.mode == "claude":
-                return self._try_claude(anomaly)
+            elif self.provider in ("ollama", "air-gapped"):
+                return self._try_ollama(incident)
+
+            elif self.provider == "claude":
+                return self._try_claude(incident)
 
             else:  # auto
-                if self._gemini.available:
-                    return self._try_gemini(anomaly)
+                if self._groq.available:
+                    return self._try_groq(incident)
+                elif self._gemini.available:
+                    return self._try_gemini(incident)
                 elif severity == "CRITICAL" and self._claude.available:
-                    return self._try_claude(anomaly)
+                    return self._try_claude(incident)
                 elif self._ollama and self._ollama.available:
-                    return self._try_ollama(anomaly)
+                    return self._try_ollama(incident)
                 elif self._claude.available:
-                    return self._try_claude(anomaly)
+                    return self._try_claude(incident)
                 else:
                     logger.warning(
-                        "No LLM backend available — using rule-based fallback"
+                        "No LLM backend available — using deterministic fallback"
                     )
-                    return self._fallback_analysis(anomaly)
+                    return self._fallback_analysis(incident)
 
         except Exception as exc:
             logger.error(f"All LLM backends failed: {exc}")
-            return self._fallback_analysis(anomaly)
+            return self._fallback_analysis(incident)
 
     # ── Backend wrappers with fallback ────────────────────────
 
-    def _try_gemini(self, anomaly: dict) -> dict:
+    def _try_groq(self, incident: dict) -> dict:
         try:
-            analysis = self._gemini.analyze(anomaly)
-            analysis = self._finalize(analysis, anomaly)
+            analysis = self._groq.analyze_incident(incident)
+            analysis = self._finalize(analysis, incident)
             logger.info(
-                f"[Gemini/{self._gemini.model}] {anomaly.get('device_id')} | "
-                f"score={anomaly.get('anomaly_score')} | "
+                f"[Groq/{self._groq.model}] {incident.get('incident_id')} | "
+                f"score={incident.get('max_score')} | "
+                f"escalate={analysis.get('escalate_immediately')}"
+            )
+            return analysis
+        except Exception as exc:
+            logger.warning(f"Groq failed ({exc}) — trying fallbacks")
+            if self._gemini and self._gemini.available:
+                return self._try_gemini(incident)
+            elif self._claude and self._claude.available:
+                return self._try_claude(incident)
+            elif self._ollama and self._ollama.available:
+                return self._try_ollama(incident)
+            return self._fallback_analysis(incident)
+
+    def _try_gemini(self, incident: dict) -> dict:
+        try:
+            analysis = self._gemini.analyze_incident(incident)
+            analysis = self._finalize(analysis, incident)
+            logger.info(
+                f"[Gemini/{self._gemini.model}] {incident.get('incident_id')} | "
+                f"score={incident.get('max_score')} | "
                 f"escalate={analysis.get('escalate_immediately')}"
             )
             return analysis
         except Exception as exc:
             logger.warning(f"Gemini failed ({exc}) — trying fallbacks")
             if self._claude and self._claude.available:
-                return self._try_claude(anomaly)
+                return self._try_claude(incident)
             elif self._ollama and self._ollama.available:
-                return self._try_ollama(anomaly)
-            return self._fallback_analysis(anomaly)
+                return self._try_ollama(incident)
+            return self._fallback_analysis(incident)
 
-    # ── Backend wrappers with fallback ────────────────────────
 
-    def _try_claude(self, anomaly: dict) -> dict:
+    def _try_claude(self, incident: dict) -> dict:
         try:
-            analysis = self._claude.analyze(anomaly)
-            analysis = self._finalize(analysis, anomaly)
+            analysis = self._claude.analyze_incident(incident)
+            analysis = self._finalize(analysis, incident)
             logger.info(
-                f"[Claude] {anomaly.get('device_id')} | "
-                f"score={anomaly.get('anomaly_score')} | "
+                f"[Claude] {incident.get('incident_id')} | "
+                f"score={incident.get('max_score')} | "
                 f"escalate={analysis.get('escalate_immediately')}"
             )
             return analysis
         except Exception as exc:
             logger.warning(f"Claude failed ({exc}) — trying Ollama")
             if self._ollama and self._ollama.available:
-                return self._try_ollama(anomaly)
-            return self._fallback_analysis(anomaly)
+                return self._try_ollama(incident)
+            return self._fallback_analysis(incident)
 
-    def _try_ollama(self, anomaly: dict) -> dict:
+    def _try_ollama(self, incident: dict) -> dict:
         try:
-            analysis = self._ollama.analyze(anomaly)
-            analysis = self._finalize(analysis, anomaly)
+            analysis = self._ollama.analyze_incident(incident)
+            analysis = self._finalize(analysis, incident)
             logger.info(
-                f"[Ollama/{self._ollama.model}] {anomaly.get('device_id')} | "
-                f"score={anomaly.get('anomaly_score')} | "
+                f"[Ollama/{self._ollama.model}] {incident.get('incident_id')} | "
+                f"score={incident.get('max_score')} | "
                 f"escalate={analysis.get('escalate_immediately')}"
             )
             return analysis
         except Exception as exc:
             logger.warning(f"Ollama failed ({exc}) — using rule-based fallback")
-            return self._fallback_analysis(anomaly)
+            return self._fallback_analysis(incident)
 
-    def _finalize(self, analysis: dict, anomaly: dict) -> dict:
+    def _finalize(self, analysis: dict, incident: dict) -> dict:
         """Stamp common fields onto a successful LLM response."""
         analysis["analyzed_at"] = datetime.now().isoformat()
         analysis["success"]     = True
-        # Inject deterministic MITRE Mapping
-        analysis["mitre_attack_ics"] = self._map_mitre_ics(anomaly.get("function_code", 0), anomaly.get("is_write", False))
+        
+        # Inject deterministic MITRE Mapping using representative alert
+        alerts = incident.get("alerts", [])
+        if alerts:
+            # Sort by anomaly_score to find the representative one
+            rep = sorted(alerts, key=lambda x: x.get("anomaly_score", 0), reverse=True)[0]
+            analysis["mitre_attack_ics"] = self._map_mitre_ics(rep.get("function_code", 0), rep.get("is_write", False))
+        else:
+            analysis["mitre_attack_ics"] = "None"
+            
         # Ensure schema completeness — fill missing keys with None
-        for key in ("analyst_notes", "operational_impact", "data_integrity_risk"):
+        for key in ("analyst_notes", "operational_impact", "data_integrity_risk", "latency_sec", "request_id"):
             analysis.setdefault(key, None)
         return analysis
 
@@ -618,23 +762,24 @@ class ThreatAdvisor:
 
     # ── Rule-based fallback (no LLM required) ─────────────────
 
-    def _fallback_analysis(self, anomaly: dict) -> dict:
+    def _fallback_analysis(self, incident: dict) -> dict:
         """
-        Deterministic rule-based analysis.
-        Used when all LLM backends are unavailable.
-        Covers the most common OT threat patterns.
+        Deterministic rule-based analysis for an incident.
+        Used when all LLM backends are unavailable or timed out.
         """
-        severity = anomaly.get("severity", "MEDIUM")
-        score    = anomaly.get("anomaly_score", 0)
-        is_write = anomaly.get("is_write", False)
-        fc       = anomaly.get("function_code", 0)
-        device   = anomaly.get("device_id", "OT device")
+        severity = incident.get("severity", "MEDIUM")
+        score    = incident.get("max_score", 0)
+        
+        # Check if any alert is a write
+        alerts = incident.get("alerts", [])
+        is_write = any(a.get("is_write", False) for a in alerts)
+        
+        # Find if there are discovery scans
+        has_discovery = any(a.get("function_code") == 43 for a in alerts)
+        
+        device   = incident.get("target_device_id", "OT device")
 
-        if fc == 43:
-            summary = (
-                f"Device identification scan (FC=43) detected targeting "
-                f"{device} — classic reconnaissance signature"
-            )
+        if has_discovery:
             actions = [
                 "Block source IP at OT network perimeter immediately",
                 "Check firewall logs for additional scan traffic",
@@ -645,10 +790,6 @@ class ThreatAdvisor:
             escalate = True
 
         elif is_write:
-            summary = (
-                f"Unauthorized write command (FC={fc}) detected on "
-                f"{device} — immediate investigation required"
-            )
             actions = [
                 "Identify source of write command — verify authorization",
                 "Check change management records for approved changes",
@@ -659,10 +800,6 @@ class ThreatAdvisor:
             escalate = True
 
         elif score >= 70:
-            summary = (
-                f"High anomaly score ({score}/100) on {device} "
-                f"— significant behavioral deviation from baseline"
-            )
             actions = [
                 "Investigate source IP for unauthorized access patterns",
                 "Review network traffic logs around this timestamp",
@@ -673,10 +810,6 @@ class ThreatAdvisor:
             escalate = score >= 80
 
         else:
-            summary = (
-                f"Moderate anomaly ({score}/100) on {device} "
-                f"— monitor and investigate"
-            )
             actions = [
                 "Monitor device for continued anomalous behavior",
                 "Review operational logs for additional context",
@@ -686,10 +819,9 @@ class ThreatAdvisor:
             escalate = False
 
         return {
-            "threat_summary": summary,
+            "threat_summary": "No AI analysis available. AI service is currently offline or unreachable.",
             "threat_detail": (
-                f"Anomaly score {score}/100 detected on "
-                f"{anomaly.get('protocol', 'OT protocol')} traffic. "
+                f"Incident max anomaly score {score}/100 detected. "
                 f"Rule-based analysis applied (LLM backends unavailable)."
             ),
             "possible_causes": [
@@ -725,25 +857,26 @@ class ThreatAdvisor:
                 "Score or command type requires immediate human review"
                 if escalate else "Monitor and review at next opportunity"
             ),
-            "mitre_attack_ics": self._map_mitre_ics(fc, is_write),
+            "mitre_attack_ics": "T0836 — Modify Parameter" if is_write else ("T0846 — Remote System Discovery" if has_discovery else "None"),
             "analyst_notes": (
-                "Rule-based fallback — configure ANTHROPIC_API_KEY "
+                "Rule-based fallback — configure GROQ_API_KEY "
                 "or start Ollama (ollama serve) for full LLM analysis"
             ),
             "analyzed_at": datetime.now().isoformat(),
             "model":       "rule-based-fallback",
-            "mode":        "rule-based",
-            "success":     True,
+            "provider":    "rule-based",
+            "success":     False,   # EXPLICITLY FALSE so dashboard can render fallback UI
+            "latency_sec": 0.0,
+            "request_id": "fallback"
         }
 
     # ── Alert formatting ──────────────────────────────────────
 
-    def format_alert_message(self, anomaly: dict, analysis: dict) -> str:
+    def format_alert_message(self, incident: dict, analysis: dict) -> str:
         """Format analysis for Telegram / Email notification channels."""
-        severity  = anomaly.get("severity", "UNKNOWN")
-        score     = anomaly.get("anomaly_score", 0)
-        device    = anomaly.get("device_id", "Unknown")
-        timestamp = anomaly.get("timestamp", "")
+        severity  = incident.get("severity", "UNKNOWN")
+        score     = incident.get("max_score", 0)
+        device    = incident.get("target_device_id", "Unknown")
         backend   = analysis.get("model", "unknown")
 
         emoji = {
@@ -754,10 +887,10 @@ class ThreatAdvisor:
         }.get(severity, "?")
 
         lines = [
-            f"[{emoji}] SECUREBRIDGE — {severity}",
-            f"Device: {device}",
-            f"Score : {score}/100",
-            f"Time  : {timestamp}",
+            f"[{emoji}] SECUREBRIDGE — INCIDENT {severity}",
+            f"Target: {device}",
+            f"Max Score : {score}/100",
+            f"Alerts: {incident.get('alert_count', 0)}",
             f"Engine: {backend}",
             f"",
             f"WHAT HAPPENED:",
@@ -818,13 +951,24 @@ if __name__ == "__main__":
         },
     }
 
-    mode = sys.argv[1] if len(sys.argv) > 1 else "auto"
-    print(f"\nThreatAdvisor test — mode: {mode}")
+    provider = sys.argv[1] if len(sys.argv) > 1 else "auto"
+    print(f"\nIncidentAnalyst test — provider: {provider}")
 
-    advisor  = ThreatAdvisor(mode=mode)
-    analysis = advisor.analyze(test_anomaly)
-    alert    = advisor.format_alert_message(test_anomaly, analysis)
-
-    print("\n" + alert)
-    print("\n--- Full Analysis ---")
-    print(json.dumps(analysis, indent=2, default=str))
+    advisor  = IncidentAnalyst(provider=provider)
+    
+    test_incident = {
+        "incident_id": "INC-TEST-001",
+        "target_ip": "192.168.40.10",
+        "target_device_id": "PLC-01",
+        "source_ip": "192.168.10.199",
+        "alert_count": 1,
+        "severity": "CRITICAL",
+        "max_score": 87.5,
+        "alerts": [test_anomaly]
+    }
+    
+    analysis = advisor.analyze_incident(test_incident)
+    print("\n--- JSON OUTPUT ---")
+    print(json.dumps(analysis, indent=2))
+    print("\n--- TELEGRAM ALERT FORMAT ---")
+    print(advisor.format_alert_message(test_incident, analysis))

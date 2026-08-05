@@ -22,8 +22,12 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import load_config
+import config.settings
+import importlib
+importlib.reload(config.settings)
+
 from core.detection.model import AnomalyScorer, IncrementalScorer, classify_severity
-from core.advisor.claude import ThreatAdvisor
+from core.advisor.incident_analyst import IncidentAnalyst
 from core.discovery.asset_registry import AssetRegistry
 from core.threat_intel import ThreatIntelFeed
 from compliance.iec62443_mapper import (
@@ -106,7 +110,8 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────
 
 @st.cache_resource
-def get_config():
+def get_config_v3():
+    # Load config and force cache reload for provider update
     return load_config("config/lab.yaml")
 
 @st.cache_resource
@@ -120,20 +125,22 @@ def get_incremental_scorer(_scorer):
 
 @st.cache_resource
 def get_advisor(_config):
-    return ThreatAdvisor(
-        mode=_config.llm.mode,
+    return IncidentAnalyst(
+        provider=_config.llm.provider,
+        groq_model=_config.llm.groq_model,
         gemini_model=_config.llm.gemini_model,
         ollama_model=_config.llm.ollama_model,
         ollama_host=_config.llm.ollama_host,
         claude_model=_config.llm.claude_model,
+        api_timeout=_config.llm.api_timeout,
     )
 
-@st.cache_data(ttl=3600)
-def get_cached_threat_analysis(anomaly_dict, _config_mode):
-    advisor = get_advisor(get_config())
-    return advisor.analyze(anomaly_dict)
+@st.cache_data(ttl=600)
+def get_cached_incident_analysis_v3(incident_dict, _config_provider):
+    advisor = get_advisor(get_config_v3())
+    return advisor.analyze_incident(incident_dict)
 
-config           = get_config()
+config           = get_config_v3()
 scorer           = get_scorer()
 incremental      = get_incremental_scorer(scorer)
 threat_intel     = ThreatIntelFeed(
@@ -297,8 +304,19 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🤖 LLM Engine")
-    st.caption(f"Mode : {config.llm.mode.upper()}")
-    st.caption(f"Model: {config.llm.gemini_model if config.llm.mode in ('auto', 'gemini') else config.llm.ollama_model}")
+    st.caption(f"Provider: {config.llm.provider.upper()}")
+    
+    # Dynamically display the appropriate model based on the selected provider
+    if config.llm.provider == "groq":
+        model_str = config.llm.groq_model
+    elif config.llm.provider == "gemini":
+        model_str = config.llm.gemini_model
+    elif config.llm.provider == "claude":
+        model_str = config.llm.claude_model
+    else:
+        model_str = config.llm.ollama_model
+        
+    st.caption(f"Model: {model_str}")
 
 # ─────────────────────────────────────────────────────────
 # Main Content & Header
@@ -453,43 +471,78 @@ with tab1:
             st.plotly_chart(fig_pie, use_container_width=True)
 
     # Active Alerts List with AI Analysis & DPI Details
-    st.markdown("#### 🚨 Active Security Alerts & AI Threat Analysis")
+    st.markdown("#### 🚨 Active Security Incidents & AI Threat Analysis")
     if not active_alerts.empty:
-        alerts_display = active_alerts.sort_values("anomaly_score", ascending=False).head(10)
-        for _, alert in alerts_display.iterrows():
-            sev = alert.get("severity", "LOW")
-            score_val = alert.get("anomaly_score", 0.0)
-            dev_id = alert.get("device_id", "PLC-01")
-            fc_name = alert.get("function_name", "Unknown Function")
-            src_ip = alert.get("src_ip", "0.0.0.0")
-            dst_ip = alert.get("dst_ip", "0.0.0.0")
-
-            expander_title = f"🔴 [{sev}] {dev_id} | Score: {score_val:.1f}/100 | {fc_name} from {src_ip}"
+        # ── INCIDENT STRATEGY: Group by Asset Pair (Target + Source) ──
+        # This replaces the O(N) per-alert LLM calls with O(1) batched incident calls
+        import hashlib
+        
+        # Sort by timestamp to ensure chronological order for the timeline
+        if "timestamp" in active_alerts.columns:
+            active_alerts = active_alerts.sort_values("timestamp", ascending=True)
+            
+        grouped_incidents = active_alerts.groupby(["dst_ip", "src_ip"])
+        
+        for (dst_ip, src_ip), group_df in grouped_incidents:
+            # Sort group to find max severity
+            group_sorted = group_df.sort_values("anomaly_score", ascending=False)
+            rep_alert = group_sorted.iloc[0]
+            
+            sev = rep_alert.get("severity", "LOW")
+            max_score = float(rep_alert.get("anomaly_score", 0.0))
+            dev_id = rep_alert.get("device_id", "PLC-01")
+            
+            # Generate deterministic Incident ID
+            date_str = datetime.now().strftime("%Y%m%d")
+            raw_hash = f"{dst_ip}-{src_ip}-{len(group_df)}"
+            hash_hex = hashlib.md5(raw_hash.encode()).hexdigest()[:6].upper()
+            incident_id = f"INC-{date_str}-{hash_hex}"
+            
+            # Build Batch Object
+            incident_dict = {
+                "incident_id": incident_id,
+                "target_ip": dst_ip,
+                "target_device_id": dev_id,
+                "source_ip": src_ip,
+                "alert_count": len(group_df),
+                "severity": sev,
+                "max_score": max_score,
+                "alerts": group_df.to_dict("records")
+            }
+            
+            expander_title = f"🔴 [{sev}] {incident_id} | Target: {dev_id} ({dst_ip}) | Attacker: {src_ip} | Alerts: {len(group_df)}"
             
             with st.expander(expander_title):
                 col_left, col_right = st.columns(2)
                 
                 with col_left:
-                    st.markdown("**📊 Wire-Level Event Details (Passive DPI)**")
+                    st.markdown("**📊 Incident Timeline (Compressed DPI)**")
                     st.json({
-                        "Device ID": dev_id,
-                        "Protocol": alert.get("protocol"),
-                        "Event Type": alert.get("event_type"),
-                        "Function Code": alert.get("function_code"),
-                        "Function Name": fc_name,
-                        "Register Address": alert.get("register_address"),
-                        "Source IP": src_ip,
-                        "Destination IP": dst_ip,
-                        "Is Write Command": alert.get("is_write"),
-                        "Anomaly Score": f"{score_val:.1f} / 100",
+                        "Incident ID": incident_id,
+                        "Target Asset": dst_ip,
+                        "Source Asset": src_ip,
+                        "Time Window": f"Last {hours_back_default if 'hours_back_default' in locals() else 24} Hours",
+                        "Total Alerts": len(group_df),
+                        "Max Anomaly Score": f"{max_score:.1f} / 100",
+                        "Representative Event": rep_alert.get("function_name", "Unknown Function"),
+                        "Is Write Command Detected": bool(group_df["is_write"].any())
                     })
 
                 with col_right:
-                    st.markdown("**🤖 AI Threat Analysis & Playbook**")
+                    st.markdown("**🤖 Incident Analyst & Playbook**")
                     if ai_enabled:
-                        with st.spinner("🤖 AI sedang menganalisis ancaman..."):
-                            analysis = get_cached_threat_analysis(alert.to_dict(), config.llm.mode)
-                        st.markdown(f"**Threat Summary:** {analysis.get('threat_summary')}")
+                        with st.spinner("🤖 Incident Analyst sedang memproses batch..."):
+                            analysis = get_cached_incident_analysis_v3(incident_dict, config.llm.provider)
+                        
+                        if analysis.get("success", False):
+                            provider_name = str(analysis.get('provider', '')).capitalize()
+                            model_name = str(analysis.get('model', '')).split('/')[-1]
+                            st.success(f"🟢 **AI Status:** Connected | **Provider:** {provider_name} | **Model:** {model_name} | **Latency:** {analysis.get('latency_sec')} sec")
+                            st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
+                        else:
+                            st.error("🔴 **AI Status:** Offline | **Deterministic Detection Active**")
+                            st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
+
                         st.markdown("**⚡ Immediate Actions:**")
                         for act in analysis.get("immediate_actions", []):
                             st.markdown(f"- {act}")
@@ -497,14 +550,16 @@ with tab1:
                         iec_ref = analysis.get("iec62443_reference", {})
                         st.caption(f"📖 IEC 62443: {iec_ref.get('requirement')} — {iec_ref.get('title')}")
                         st.caption(f"🎯 MITRE ATT&CK: {analysis.get('mitre_attack_ics')}")
+                        if analysis.get("request_id"):
+                            st.caption(f"*(Req ID: {analysis.get('request_id')})*")
 
-                        # Interactive Firewall Playbook Expander
-                        with st.expander("🛡️ Preview Firewall Containment Rule"):
-                            st.code(f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
+                        # Interactive Firewall Playbook (Removed nested expander to fix Streamlit exception)
+                        st.markdown("🛡️ **Preview Firewall Containment Rule**")
+                        st.code(f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
 # Block unauthorized traffic from {src_ip} to {dst_ip}
 iptables -A FORWARD -s {src_ip} -d {dst_ip} -p tcp --dport 502 -j DROP
 # Log containment action
-logger -t SECUREBRIDGE "CONTAINMENT: Blocked unauthorized Modbus FC{alert.get('function_code')} from {src_ip}"
+logger -t SECUREBRIDGE "CONTAINMENT: Blocked attacker {src_ip} targeting {dst_ip}"
 """, language="bash")
     else:
         st.success("✅ No active alerts above threshold. Network operations normal.")

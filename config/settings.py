@@ -72,19 +72,22 @@ class LLMConfig:
     """
     LLM backend selection for ThreatAdvisor.
 
-    mode options:
+    provider options:
+        groq       — Uses Groq API (free tier, ultra-fast, requires GROQ_API_KEY)
         auto       — Uses Gemini/Claude if available, fallback to Ollama/Rule engine
         gemini     — Uses Google Gemini API (free tier, ultra-fast, requires GEMINI_API_KEY)
         claude     — Always use Claude API (requires ANTHROPIC_API_KEY)
         ollama     — Always use local Ollama (air-gapped environments)
         air-gapped — Alias for ollama; makes intent explicit in config
     """
-    mode: str = "auto"             # auto | gemini | claude | ollama | air-gapped
+    provider: str = "groq"         # groq | auto | gemini | claude | ollama | air-gapped
+    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     gemini_model: str = "gemini-flash-latest"
     ollama_model: str = "llama3.1" # Ollama model tag
     ollama_host: str = "http://localhost:11434"
     claude_model: str = "claude-sonnet-4-6"
     max_tokens: int = 1500
+    api_timeout: int = 8           # Timeout in seconds for AI inference
 
 
 @dataclass
@@ -157,12 +160,14 @@ def load_config(config_path: str = "config/active.yaml") -> SecureBridgeConfig:
     if "llm" in raw:
         lc = raw["llm"]
         config.llm = LLMConfig(
-            mode=lc.get("mode", "auto"),
+            provider=lc.get("provider", lc.get("mode", "groq")), # Backward compatibility for mode
+            groq_model=lc.get("groq_model", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")),
             gemini_model=lc.get("gemini_model", "gemini-1.5-flash"),
             ollama_model=lc.get("ollama_model", "llama3.1"),
             ollama_host=lc.get("ollama_host", "http://localhost:11434"),
             claude_model=lc.get("claude_model", "claude-sonnet-4-6"),
             max_tokens=lc.get("max_tokens", 1500),
+            api_timeout=lc.get("api_timeout", 8),
         )
 
     return config
