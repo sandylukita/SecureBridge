@@ -2,7 +2,7 @@
 ### AI-Powered OT/ICS Security Command Center & Compliance Platform
 
 > **Built by:** Sandy Lukita | PT Optima Sarana Instrument  
-> **Status:** Active Development — Live Deployment Ready  
+> **Status:** Technology Demonstrator | Architecture Validated | Azure Showcase Ready  
 > **Version:** 1.7.0  
 
 ---
@@ -51,7 +51,7 @@ The monitoring interface has **no IP address** and cannot initiate connections.
 
 - **BPF filter** targets only OT protocol ports — no promiscuous noise
 - **Automatic fallback** to raw sockets if TShark is unavailable
-- Same passive architecture used by **Nozomi Networks** and **Claroty**
+- Uses the same passive network monitoring principle employed by commercial OT monitoring platforms.
 
 ```python
 # Interview answer:
@@ -188,17 +188,17 @@ Audit-ready compliance reporting:
 
 ## 🛡️ Case Study & Real-World Scenario Compliance
 
-SecureBridge has been **100% verified** against 7 critical real-world OT security scenarios defined in [`study-case.md`](study-case.md):
+SecureBridge has been validated against seven internally defined OT security scenarios documented in [`study-case.md`](docs/study-case.md):
 
 | Scenario | Focus Area | Verification Status | Key Capability |
 |---|---|:---:|---|
-| **Scenario 1** | IEC 62443 Audit & Air-Gapped Deployment | ✅ **100% Verified** | Local Ollama (`llama3.1`) + PDF report generator |
-| **Scenario 2** | IT Ransomware Spreading to Industrial DMZ | ✅ **100% Verified** | Burst/scan detection + Level 3.5 containment playbook |
-| **Scenario 3** | Rogue Contractor & Physical Bypass | ✅ **100% Verified** | Wire-level Pyshark DPI + `value_deviation` outlier scoring |
-| **Scenario 4** | Safety Interlock Bypass & Logic Tampering | ✅ **100% Verified** | FC=15/16/43 high-risk weighting + integrity warning playbook |
-| **Scenario 5** | Multi-Site Remote Infrastructure (GCC Grid) | ✅ **100% Verified** | On-premise Edge processing + lightweight <2KB alert JSON |
-| **Scenario 6** | Air-Gapped Notification & Local Routing | ✅ **100% Verified** | Zero external inbound/outbound cloud dependency |
-| **Scenario 7** | Supply Chain Attack & Trojanized Firmware | ✅ **100% Verified** | Signature-independent behavioral baseline (Isolation Forest) |
+| **Scenario 1** | IEC 62443 Audit & Air-Gapped Deployment | ✅ **Validated** | Local Ollama (`llama3.1`) + PDF report generator |
+| **Scenario 2** | IT Ransomware Spreading to Industrial DMZ | ✅ **Validated** | Burst/scan detection + Level 3.5 containment playbook |
+| **Scenario 3** | Rogue Contractor & Physical Bypass | ✅ **Validated** | Wire-level Pyshark DPI + `value_deviation` outlier scoring |
+| **Scenario 4** | Safety Interlock Bypass & Logic Tampering | ✅ **Validated** | FC=15/16/43 high-risk weighting + integrity warning playbook |
+| **Scenario 5** | Multi-Site Remote Infrastructure (GCC Grid) | ✅ **Validated** | On-premise Edge processing + lightweight <2KB alert JSON |
+| **Scenario 6** | Air-Gapped Notification & Local Routing | ✅ **Validated** | Zero external inbound/outbound cloud dependency |
+| **Scenario 7** | Supply Chain Attack & Trojanized Firmware | ✅ **Validated** | Signature-independent behavioral baseline (Isolation Forest) |
 
 ---
 
