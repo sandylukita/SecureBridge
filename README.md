@@ -204,27 +204,19 @@ SecureBridge has been validated against seven internally defined OT security sce
 
 ## Design Decisions
 
-### Evolving from Event-based to Incident-based AI Analysis (V1 → V2)
+### Architectural Evolution: V1 → V2 → V3
 
-The initial version of SecureBridge (V1) implemented a straightforward event-based AI analysis pattern:
-```
-Packet → Alert → LLM
-```
-While this worked well for isolated tests, it introduced an `O(N)` API call complexity. If an attacker launched a sequence of 50 Modbus write commands, the dashboard would make 50 sequential calls to the LLM backend. This pattern suffered from rate limits (e.g., triggering HTTP 429 Too Many Requests on free-tier APIs) and failed to provide the LLM with the sequence-level context necessary for root cause analysis.
+**V1: Event-based (Packet → Alert → LLM)**
+The initial version implemented a straightforward event-based pattern. If an attacker launched 50 Modbus write commands, the dashboard made 50 sequential calls to the LLM backend. This pattern suffered from severe rate limits (HTTP 429) and failed to provide the LLM with sequence-level context.
 
-**The V2 Architecture Shift**
-SecureBridge V2 transitions the AI backend into an `O(1)` Incident-Based Batching pattern:
-```
-Packet → Alert → Incident Builder → Incident Summary → LLM
-```
+**V2: Incident-based (Alerts → Incident Builder → Incident Summary → LLM)**
+V2 transitioned the backend into an `O(1)` Incident-Based Batching pattern. The **IncidentAnalyst** grouped anomalies into highly contextual **Incidents** (e.g., grouped by Source IP + Target IP). Identical sequence steps were compressed into a summary before passing it to the LLM. 
+*The Flaw:* While this bypassed rate limiting, the AI was invoked *automatically in the Streamlit render loop*. If a refresh brought in 4 incidents, the UI would freeze for 10-15 seconds waiting for all LLMs to return before the dashboard even appeared.
 
-Instead of looping through raw alerts, the **IncidentAnalyst** groups anomalies into highly contextual **Incidents** using an extensible `IncidentStrategy` (defaulting to grouping by the Asset Pair: `Source IP` + `Target IP`). 
-It then compresses identical sequence steps (e.g., "30x Modbus Read") into an `Incident Summary` before passing it to the LLM. 
-
-This DDD (Domain-Driven Design) shift achieves three critical improvements:
-1. **Zero Rate Limiting:** Batches all related alerts into a single API request, entirely bypassing Gemini/Azure free-tier rate limits.
-2. **Context Enrichment:** The LLM now analyzes the *sequence* of an attack rather than isolated packets, drastically reducing hallucination and improving mitigation playbooks.
-3. **SIEM-grade Caching:** Responses are now cached based on an `Incident ID` signature, ensuring deterministic, ultra-fast dashboard rendering during client presentations.
+**V3: On-Demand Deterministic Rendering + Async Persistence (Current)**
+To achieve true "SIEM-grade" responsiveness, V3 completely decouples AI from the initial render path:
+1. **On-Demand AI:** The dashboard loads instantly (<3 seconds), displaying only deterministic facts (timeline, protocol, MITRE mappings). The LLM is strictly invoked as an **On-Demand Detective** only when the analyst explicitly clicks "Generate AI Investigation".
+2. **Asynchronous SIEM Caching:** In V2, incremental scoring on 100k+ events was bottlenecked by a synchronous `pickle.dump()` cache save, causing massive UI freezes. V3 moves this entirely to a thread-safe asynchronous background process, dropping ML scoring UI-blocking latency from ~13s to ~3s.
 
 ---
 
@@ -360,6 +352,19 @@ python core/capture/monitor.py config/live.yaml
 | **Dashboard** | Streamlit + Plotly (Cyber Dark Theme + 4 Tabs) |
 | **PDF Reports** | ReportLab (IEC 62443 SUC + Risk Register RS1-RS12) |
 | **Alerts** | smtplib + python-telegram-bot |
+
+---
+
+## 📊 Local AI Benchmark
+
+To ensure optimal performance across different deployment environments, SecureBridge LLM engines are chosen based on empirical benchmarks against OT security workloads (e.g., incident summarization, FC sequence reasoning, MITRE mapping), rather than generic model popularity.
+
+| Model               | Device Environment                 | Latency | Memory  | Verdict                  |
+| ------------------- | ---------------------------------- | ------- | ------- | ------------------------ |
+| Groq (Llama 3.3 70B)| Azure B1s (Cloud API)              | 1.2 s   | Cloud   | ⭐ **Demo Default**         |
+| Qwen2.5 3B (Ollama) | i7-11850H + 32GB + RTX A2000 4GB   | 2.8 s   | ~3–4 GB | ⭐ **Air-gapped Recommended**|
+| Phi-3 Mini (Ollama) | i7-11850H + 32GB + RTX A2000 4GB   | 1.9 s   | ~2–3 GB | ⭐ Fastest Local          |
+| Llama 3.1 8B        | i7-11850H + 32GB + RTX A2000 4GB   | 115 s   | ~8 GB   | ❌ Too heavy for 4GB VRAM |
 
 ---
 

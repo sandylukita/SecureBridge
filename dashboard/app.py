@@ -29,6 +29,10 @@ importlib.reload(config.settings)
 from core.detection.model import AnomalyScorer, IncrementalScorer, classify_severity
 from core.advisor.incident_analyst import IncidentAnalyst
 from core.discovery.asset_registry import AssetRegistry
+import sys, importlib
+if "core.discovery.asset_registry" in sys.modules:
+    importlib.reload(sys.modules["core.discovery.asset_registry"])
+from core.discovery.asset_registry import AssetRegistry
 from core.threat_intel import ThreatIntelFeed
 from compliance.iec62443_mapper import (
     FINDING_TO_IEC, IEC62443_REQUIREMENTS,
@@ -135,6 +139,13 @@ def get_advisor(_config):
         api_timeout=_config.llm.api_timeout,
     )
 
+@st.cache_resource
+def get_threat_intel(mode):
+    return ThreatIntelFeed(
+        cache_path="data/threat_intel/cisa_cache.json",
+        mode=mode,
+    )
+
 @st.cache_data(ttl=600)
 def get_cached_incident_analysis_v3(incident_dict, _config_provider):
     advisor = get_advisor(get_config_v3())
@@ -143,13 +154,11 @@ def get_cached_incident_analysis_v3(incident_dict, _config_provider):
 config           = get_config_v3()
 scorer           = get_scorer()
 incremental      = get_incremental_scorer(scorer)
-threat_intel     = ThreatIntelFeed(
-    cache_path="data/threat_intel/cisa_cache.json",
-    mode=config.mode,
-)
+advisor          = get_advisor(config)
+threat_intel     = get_threat_intel(config.mode)
 
 # Initialize Asset Registry in Session State
-if "asset_registry" not in st.session_state:
+if "asset_registry" not in st.session_state or not hasattr(st.session_state.asset_registry, "process_events"):
     st.session_state.asset_registry = AssetRegistry()
 
 asset_registry = st.session_state.asset_registry
@@ -218,11 +227,14 @@ def score_events(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    t_inc = time.time()
     scored = incremental.score_incremental(df)
+    log.info(f"[TIMING] score_incremental only: {time.time()-t_inc:.2f}s")
 
-    # Passively update asset registry from scored results
-    for _, row in scored.iterrows():
-        asset_registry.process_event(row.to_dict())
+    t_reg = time.time()
+    # Passively update asset registry from scored results (vectorized)
+    asset_registry.process_events(scored)
+    log.info(f"[TIMING] asset_registry update: {time.time()-t_reg:.2f}s")
 
     return scored
 
@@ -322,9 +334,22 @@ with st.sidebar:
 # Main Content & Header
 # ─────────────────────────────────────────────────────────
 
+import time
+import logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("SecureBridge.Timing")
+
+t_start = time.time()
 df_raw = load_events(hours_back)
+log.info(f"[TIMING] load_events: {time.time()-t_start:.2f}s")
+
+t_checkpoint = time.time()
 df = score_events(df_raw)
+log.info(f"[TIMING] scoring: {time.time()-t_checkpoint:.2f}s")
+
+t_checkpoint = time.time()
 has_data = not df.empty and "timestamp" in df.columns
+log.info(f"[TIMING] remaining_init: {time.time()-t_checkpoint:.2f}s")
 
 mode_badge = (
     '<span class="badge-live">● LIVE</span>'
@@ -481,6 +506,9 @@ with tab1:
         if "timestamp" in active_alerts.columns:
             active_alerts = active_alerts.sort_values("timestamp", ascending=True)
             
+        if "ai_results" not in st.session_state:
+            st.session_state["ai_results"] = {}
+            
         grouped_incidents = active_alerts.groupby(["dst_ip", "src_ip"])
         
         for (dst_ip, src_ip), group_df in grouped_incidents:
@@ -493,8 +521,14 @@ with tab1:
             dev_id = rep_alert.get("device_id", "PLC-01")
             
             # Generate deterministic Incident ID
-            date_str = datetime.now().strftime("%Y%m%d")
-            raw_hash = f"{dst_ip}-{src_ip}-{len(group_df)}"
+            if "timestamp" in group_df.columns:
+                first_seen = group_df["timestamp"].min()
+            else:
+                first_seen = datetime.now()
+                
+            date_str = first_seen.strftime("%Y%m%d")
+            # Stable hash based on first_seen time instead of row count
+            raw_hash = f"{dst_ip}-{src_ip}-{first_seen.isoformat()}"
             hash_hex = hashlib.md5(raw_hash.encode()).hexdigest()[:6].upper()
             incident_id = f"INC-{date_str}-{hash_hex}"
             
@@ -512,7 +546,10 @@ with tab1:
             
             expander_title = f"🔴 [{sev}] {incident_id} | Target: {dev_id} ({dst_ip}) | Attacker: {src_ip} | Alerts: {len(group_df)}"
             
-            with st.expander(expander_title):
+            # Keep expander open if AI analysis exists, OR if the button was just clicked
+            is_button_clicked = st.session_state.get(f"btn_ai_{incident_id}", False)
+            is_expanded = is_button_clicked or (incident_id in st.session_state.get("ai_results", {}))
+            with st.expander(expander_title, expanded=is_expanded):
                 col_left, col_right = st.columns(2)
                 
                 with col_left:
@@ -531,27 +568,34 @@ with tab1:
                 with col_right:
                     st.markdown("**🤖 Incident Analyst & Playbook**")
                     if ai_enabled:
-                        with st.spinner("🤖 Incident Analyst sedang memproses batch..."):
-                            analysis = get_cached_incident_analysis_v3(incident_dict, config.llm.provider)
+                        if st.button(f"Generate AI Analysis", key=f"btn_ai_{incident_id}", type="primary"):
+                            with st.spinner("🤖 Incident Analyst sedang memproses batch..."):
+                                analysis = get_cached_incident_analysis_v3(incident_dict, config.llm.provider)
+                                st.session_state["ai_results"][incident_id] = analysis
                         
-                        if analysis.get("success", False):
-                            provider_name = str(analysis.get('provider', '')).capitalize()
-                            model_name = str(analysis.get('model', '')).split('/')[-1]
-                            st.success(f"🟢 **AI Status:** Connected | **Provider:** {provider_name} | **Model:** {model_name} | **Latency:** {analysis.get('latency_sec')} sec")
-                            st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
-                        else:
-                            st.error("🔴 **AI Status:** Offline | **Deterministic Detection Active**")
-                            st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
+                        analysis = st.session_state["ai_results"].get(incident_id)
 
-                        st.markdown("**⚡ Immediate Actions:**")
-                        for act in analysis.get("immediate_actions", []):
-                            st.markdown(f"- {act}")
-                        
-                        iec_ref = analysis.get("iec62443_reference", {})
-                        st.caption(f"📖 IEC 62443: {iec_ref.get('requirement')} — {iec_ref.get('title')}")
-                        st.caption(f"🎯 MITRE ATT&CK: {analysis.get('mitre_attack_ics')}")
-                        if analysis.get("request_id"):
-                            st.caption(f"*(Req ID: {analysis.get('request_id')})*")
+                        if analysis:
+                            if analysis.get("success", False):
+                                provider_name = str(analysis.get('provider', '')).capitalize()
+                                model_name = str(analysis.get('model', '')).split('/')[-1]
+                                st.success(f"🟢 **AI Status:** Connected | **Provider:** {provider_name} | **Model:** {model_name} | **Latency:** {analysis.get('latency_sec')} sec")
+                                st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
+                            else:
+                                st.error("🔴 **AI Status:** Offline | **Deterministic Detection Active**")
+                                st.markdown(f"**Incident Summary:** {analysis.get('threat_summary')}")
+
+                            st.markdown("**⚡ Immediate Actions:**")
+                            for act in analysis.get("immediate_actions", []):
+                                st.markdown(f"- {act}")
+                            
+                            iec_ref = analysis.get("iec62443_reference", {})
+                            st.caption(f"📖 IEC 62443: {iec_ref.get('requirement')} — {iec_ref.get('title')}")
+                            st.caption(f"🎯 MITRE ATT&CK: {analysis.get('mitre_attack_ics')}")
+                            if analysis.get("request_id"):
+                                st.caption(f"*(Req ID: {analysis.get('request_id')})*")
+                        else:
+                            st.info("💡 Klik tombol di atas untuk menjalankan AI Incident Analyst pada batch ini.")
 
                         # Interactive Firewall Playbook (Removed nested expander to fix Streamlit exception)
                         st.markdown("🛡️ **Preview Firewall Containment Rule**")

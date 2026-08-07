@@ -112,6 +112,61 @@ class AssetRegistry:
                 asset.active_threat = True
                 asset.status = "CRITICAL" if score >= 85 else "WARNING"
 
+    def process_events(self, df):
+        """Vectorized update of assets from a DataFrame of events"""
+        import pandas as pd
+        if df.empty:
+            return
+            
+        src_ips = set(df["src_ip"].dropna().unique())
+        dst_ips = set(df["dst_ip"].dropna().unique())
+        all_ips = src_ips | dst_ips
+        
+        unknown_ips = all_ips - set(self.assets.keys())
+        for ip in unknown_ips:
+            mask = (df["src_ip"] == ip) | (df["dst_ip"] == ip)
+            sub_df = df[mask]
+            
+            unit_id = None
+            if "unit_id" in sub_df.columns:
+                units = sub_df["unit_id"].dropna()
+                if not units.empty:
+                    unit_id = int(units.iloc[0])
+                    
+            protocol = "Modbus TCP"
+            if "protocol" in sub_df.columns:
+                protos = sub_df["protocol"].dropna()
+                if not protos.empty:
+                    protocol = str(protos.iloc[0])
+                    
+            self._discover_asset(ip, unit_id, protocol)
+            
+        src_counts = df["src_ip"].value_counts() if "src_ip" in df.columns else pd.Series()
+        dst_counts = df["dst_ip"].value_counts() if "dst_ip" in df.columns else pd.Series()
+        total_counts = src_counts.add(dst_counts, fill_value=0).astype(int)
+        
+        if "anomaly_score" in df.columns:
+            src_max = df.groupby("src_ip")["anomaly_score"].max() if "src_ip" in df.columns else pd.Series()
+            dst_max = df.groupby("dst_ip")["anomaly_score"].max() if "dst_ip" in df.columns else pd.Series()
+            max_scores = pd.concat([src_max, dst_max], axis=1).max(axis=1)
+        else:
+            max_scores = pd.Series(0.0, index=total_counts.index)
+            
+        now_str = datetime.now().isoformat()
+        
+        for ip, count in total_counts.items():
+            if ip in self.assets:
+                asset = self.assets[ip]
+                asset.event_count += count
+                asset.last_seen = now_str
+                
+                score = float(max_scores.get(ip, 0.0))
+                if score > asset.max_score:
+                    asset.max_score = score
+                if score >= 75.0:
+                    asset.active_threat = True
+                    asset.status = "CRITICAL" if score >= 85 else "WARNING"
+
     def _discover_asset(self, ip: str, unit_id: Optional[int], protocol: str):
         """Infer Purdue level and asset type from IP subnet & protocol profile"""
         parts = ip.split(".")

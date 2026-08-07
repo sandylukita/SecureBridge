@@ -39,7 +39,7 @@ llm:
   provider: auto                   # groq | auto | gemini | claude | ollama | air-gapped
   groq_model: llama-3.3-70b-versatile
   gemini_model: gemini-flash-latest # Free tier & ultra-fast for showcase (needs GEMINI_API_KEY)
-  ollama_model: llama3.1       # Local model (run: ollama pull llama3.1)
+  ollama_model: qwen2.5:3b       # Local model (run: ollama pull qwen2.5:3b)
   ollama_host: http://localhost:11434
   claude_model: claude-sonnet-4-6
 

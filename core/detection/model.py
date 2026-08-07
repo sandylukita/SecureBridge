@@ -692,6 +692,10 @@ class IncrementalScorer:
         self.cache_path = cache_path
         self._cache: dict = {}          # {row_hash: {anomaly_score, severity, is_anomaly}}
         self._cached_model_ts: str = "" # trained_at of model when cache was built
+        
+        import threading
+        self._save_lock = threading.Lock()
+        
         self._load_cache()
 
     # ── Cache I/O ─────────────────────────────────────────────
@@ -721,17 +725,31 @@ class IncrementalScorer:
             self._cache = {}
 
     def _save_cache(self) -> None:
-        """Persist cache to disk."""
-        try:
-            os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-            with open(self.cache_path, "wb") as f:
-                pickle.dump({
-                    "version":  self.CACHE_VERSION,
-                    "model_ts": self._current_model_ts(),
-                    "cache":    self._cache,
-                }, f)
-        except Exception as exc:
-            logger.warning(f"IncrementalScorer: cache save failed ({exc})")
+        """Persist cache to disk asynchronously to prevent blocking the UI."""
+        import threading
+        
+        # Shallow copy to avoid dictionary size changing during iteration in the background thread
+        cache_copy = self._cache.copy()
+        model_ts = self._current_model_ts()
+        version = self.CACHE_VERSION
+        
+        def _write():
+            if not self._save_lock.acquire(blocking=False):
+                return  # Another save is already in progress, skip this one
+            try:
+                os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+                with open(self.cache_path, "wb") as f:
+                    pickle.dump({
+                        "version":  version,
+                        "model_ts": model_ts,
+                        "cache":    cache_copy,
+                    }, f)
+            except Exception as exc:
+                logger.warning(f"IncrementalScorer: cache save failed ({exc})")
+            finally:
+                self._save_lock.release()
+                
+        threading.Thread(target=_write, daemon=True).start()
 
     def _current_model_ts(self) -> str:
         """Return the trained_at timestamp of the currently loaded model."""
@@ -788,7 +806,21 @@ class IncrementalScorer:
             self._cached_model_ts = current_ts
 
         df = df.copy().reset_index(drop=True)
-        df["_row_hash"] = df.apply(self._hash_row, axis=1)
+        
+        import hashlib
+        def safe_col(col_name):
+            if col_name in df.columns:
+                return df[col_name].fillna("").astype(str)
+            return pd.Series("", index=df.index)
+
+        hash_keys = (
+            safe_col("timestamp") +
+            safe_col("device_id") +
+            safe_col("register_address") +
+            safe_col("function_code") +
+            safe_col("src_ip")
+        )
+        df["_row_hash"] = hash_keys.apply(lambda k: hashlib.md5(k.encode()).hexdigest())
 
         # Split: rows already in cache vs rows that need scoring
         cached_mask = df["_row_hash"].isin(self._cache)
@@ -820,14 +852,16 @@ class IncrementalScorer:
 
         # Apply cached scores to old rows
         if not old_df.empty:
+            row_hashes = old_df["_row_hash"]
             old_df = old_df.drop(columns=["_row_hash"])
-            for col in ("anomaly_score", "severity", "is_anomaly"):
-                old_df[col] = old_df.apply(
-                    lambda r: self._cache.get(
-                        df.loc[r.name, "_row_hash"], {}
-                    ).get(col, 0 if col == "anomaly_score" else "UNKNOWN"),
-                    axis=1,
-                )
+            
+            cache_anomaly = {k: v.get("anomaly_score", 0) for k, v in self._cache.items()}
+            cache_severity = {k: v.get("severity", "UNKNOWN") for k, v in self._cache.items()}
+            cache_is_anomaly = {k: v.get("is_anomaly", False) for k, v in self._cache.items()}
+            
+            old_df["anomaly_score"] = row_hashes.map(cache_anomaly).fillna(0)
+            old_df["severity"] = row_hashes.map(cache_severity).fillna("UNKNOWN")
+            old_df["is_anomaly"] = row_hashes.map(cache_is_anomaly).fillna(False)
         else:
             old_df = pd.DataFrame()
 

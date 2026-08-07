@@ -545,7 +545,7 @@ class IncidentAnalyst:
         ollama_host: str = "http://localhost:11434",
         claude_model: str = "claude-sonnet-4-6",
         max_tokens: int = 1500,
-        api_timeout: int = 8,
+        api_timeout: int = 30,
     ):
         self.provider = provider
         
