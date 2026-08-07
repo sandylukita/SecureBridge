@@ -448,6 +448,14 @@ with tab1:
         st.markdown("#### 📈 Anomaly Score Timeline")
         if has_data:
             df_plot = df.sort_values("timestamp")
+            
+            # [OPTIMIZATION] Downsample points for Plotly to prevent OOM on 2GB VMs
+            # Browsers and Streamlit servers will crash/swap if fed 100k+ points for rendering.
+            # We limit to max 1500 points for the timeline visualization.
+            if len(df_plot) > 1500:
+                step = len(df_plot) // 1500
+                df_plot = df_plot.iloc[::step]
+                
             fig = px.line(
                 df_plot,
                 x="timestamp",
