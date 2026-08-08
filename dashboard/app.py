@@ -27,6 +27,7 @@ import importlib
 importlib.reload(config.settings)
 
 from core.detection.model import AnomalyScorer, IncrementalScorer, classify_severity
+from core.ingestion.event_reader import IncrementalEventReader
 from core.advisor.incident_analyst import IncidentAnalyst
 from core.discovery.asset_registry import AssetRegistry
 import sys, importlib
@@ -146,6 +147,14 @@ def get_threat_intel(mode):
         mode=mode,
     )
 
+@st.cache_resource
+def get_event_reader(_config):
+    """Bounded-memory incremental event reader (O(delta-N) I/O per refresh)."""
+    return IncrementalEventReader(
+        log_dir=_config.log_dir,
+        state_path="data/models/event_counters.json",
+    )
+
 @st.cache_data(ttl=600)
 def get_cached_incident_analysis_v3(incident_dict, _config_provider):
     advisor = get_advisor(get_config_v3())
@@ -156,6 +165,7 @@ scorer           = get_scorer()
 incremental      = get_incremental_scorer(scorer)
 advisor          = get_advisor(config)
 threat_intel     = get_threat_intel(config.mode)
+event_reader     = get_event_reader(config)
 
 # Initialize Asset Registry in Session State
 if "asset_registry" not in st.session_state or not hasattr(st.session_state.asset_registry, "process_events"):
@@ -164,54 +174,24 @@ if "asset_registry" not in st.session_state or not hasattr(st.session_state.asse
 asset_registry = st.session_state.asset_registry
 
 # ─────────────────────────────────────────────────────────
-# Data Loading Function
+# Data Loading — Bounded-Memory Incremental Event Processing
 # ─────────────────────────────────────────────────────────
 
 def load_events(hours: int = 24) -> pd.DataFrame:
-    """Load all OT events within the given time window from disk.
+    """Return the most-recent bounded working set from the incremental reader.
 
-    No sampling is applied — security dashboards must process every event.
-    Sampling in a security context introduces deliberate false-negative risk:
-    a 1-in-2000 CRITICAL event that happens to fall outside a random sample
-    will be silently missed. Instead we load the complete time window and let
-    Isolation Forest decide what is anomalous.
+    Architecture: IncrementalEventReader reads ONLY newly-appended bytes
+    since the last call (O(delta-N) disk I/O).  The working set is bounded
+    at 5,000 rows via a deque — memory consumption is independent of the
+    historical log size.  Persistent counters (total_events, total_critical,
+    total_high) survive both Streamlit refreshes and application restarts
+    via data/models/event_counters.json.
+
+    The `hours` argument is accepted for API compatibility but is no longer
+    used to scan historical data; the reader always returns the most-recent
+    events up to the window size.
     """
-    log_dir = config.log_dir
-    if not os.path.exists(log_dir):
-        return pd.DataFrame()
-
-    all_files = [
-        os.path.join(log_dir, f)
-        for f in os.listdir(log_dir)
-        if f.endswith(".csv")
-    ]
-    if not all_files:
-        return pd.DataFrame()
-
-    # Load the two most recent files (today + yesterday) to cover multi-day windows
-    latest_files = sorted(all_files, reverse=True)[:2]
-    dfs = []
-    for f in latest_files:
-        try:
-            df_temp = pd.read_csv(f)
-            dfs.append(df_temp)
-        except Exception:
-            pass
-
-    if not dfs:
-        return pd.DataFrame()
-
-    df = pd.concat(dfs, ignore_index=True)
-
-    # Filter to the requested time window only
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        cutoff = datetime.now() - timedelta(hours=hours)
-        df_filtered = df[df["timestamp"] >= cutoff]
-        if not df_filtered.empty:
-            df = df_filtered
-
-    return df
+    return event_reader.get_recent_df()
 
 def score_events(df: pd.DataFrame) -> pd.DataFrame:
     """Score events using incremental Isolation Forest scoring.
@@ -257,9 +237,9 @@ with st.sidebar:
         with st.spinner("Generating PDF report..."):
             try:
                 from compliance.report_generator import generate_report
-                
-                df_temp = load_events(hours_back_default if 'hours_back_default' in locals() else 24)
-                df_scored = score_events(df_temp)
+
+                # Use the already-loaded df from incremental reader — no second CSV scan
+                df_scored = df if "df" in dir() and not df.empty else score_events(load_events())
                 active_alerts = df_scored[df_scored["anomaly_score"] >= 60] if not df_scored.empty else pd.DataFrame()
                 has_crit = not active_alerts[active_alerts["severity"] == "CRITICAL"].empty if not active_alerts.empty else False
                 has_high = not active_alerts[active_alerts["severity"] == "HIGH"].empty if not active_alerts.empty else False
@@ -385,43 +365,46 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ─────────────────────────────────────────────────────────
 
 with tab1:
+    # ── Persistent counters (survive restart) ────────────────────────────────
+    _counters = event_reader.counters
+    total_events_lifetime = _counters["total_events"]
+
     if has_data:
-        total_events = len(df)
-        active_alerts = df[df["anomaly_score"] >= threshold]
-        crit_count = len(df[df["severity"] == "CRITICAL"])
-        high_count = len(df[df["severity"] == "HIGH"])
-        med_count = len(df[df["severity"] == "MEDIUM"])
+        recent_alerts = df[df["anomaly_score"] >= threshold]
+        recent_crit   = len(df[df["severity"] == "CRITICAL"])
+        recent_high   = len(df[df["severity"] == "HIGH"])
         devices_count = df["device_id"].nunique() if "device_id" in df.columns else 3
-        avg_score = df["anomaly_score"].mean()
+        avg_score     = df["anomaly_score"].mean()
     else:
-        total_events = 0
-        active_alerts = pd.DataFrame()
-        crit_count = 0
-        high_count = 0
-        med_count = 0
+        recent_alerts = pd.DataFrame()
+        recent_crit   = 0
+        recent_high   = 0
         devices_count = 3
-        avg_score = 0.0
+        avg_score     = 0.0
+
+    # Keep backward-compatible name used downstream for incident grouping
+    active_alerts = recent_alerts
 
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.markdown(f"""
         <div class="soc-card status-crit">
-            <div class="soc-card-title">Active Alerts</div>
-            <div class="soc-card-value">{len(active_alerts)}</div>
+            <div class="soc-card-title">Total Events Processed</div>
+            <div class="soc-card-value">{total_events_lifetime:,}</div>
         </div>
         """, unsafe_allow_html=True)
     with col2:
         st.markdown(f"""
         <div class="soc-card status-crit">
-            <div class="soc-card-title">Critical Severity</div>
-            <div class="soc-card-value">{crit_count}</div>
+            <div class="soc-card-title">Recent Alerts <span style="font-size:9px;opacity:.6">last 5k</span></div>
+            <div class="soc-card-value">{len(recent_alerts)}</div>
         </div>
         """, unsafe_allow_html=True)
     with col3:
         st.markdown(f"""
-        <div class="soc-card status-high">
-            <div class="soc-card-title">High Severity</div>
-            <div class="soc-card-value">{high_count}</div>
+        <div class="soc-card status-crit">
+            <div class="soc-card-title">Recent Critical <span style="font-size:9px;opacity:.6">last 5k</span></div>
+            <div class="soc-card-value">{recent_crit}</div>
         </div>
         """, unsafe_allow_html=True)
     with col4:
