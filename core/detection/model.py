@@ -158,10 +158,14 @@ def engineer_features(df: pd.DataFrame, known_src_ips: set = None) -> pd.DataFra
         features["function_code_risk"] = 0
 
     # ── Write flag ───────────────────────────────────────────
+    # Defensive conversion: accepts bool, int, or string 'True'/'False'
+    # (csv.DictReader returns all values as strings; pd.read_csv auto-infers)
     if "is_write" in df.columns:
-        features["is_write"] = df["is_write"].astype(int)
+        _is_write_str = df["is_write"].astype(str).str.strip().str.lower()
+        features["is_write"] = _is_write_str.isin(["true", "1"]).astype(int)
     else:
         features["is_write"] = 0
+
 
     # ── Register address ─────────────────────────────────────
     if "register_address" in df.columns:
