@@ -1,4 +1,4 @@
-﻿"""
+"""
 core/ingestion/event_reader.py
 ──────────────────────────────────────────────────────────────────────
 Bounded-Memory Incremental Event Processing for SecureBridge.
@@ -266,11 +266,27 @@ class IncrementalEventReader:
         if not self._buf:
             return pd.DataFrame()
         df = pd.DataFrame(list(self._buf))
+
+        # Type coercion — csv.DictReader returns ALL values as strings.
+        # pd.read_csv() used to auto-infer types; we must do it explicitly.
+
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        for col in ("anomaly_score",):
+
+        # Numeric columns
+        for col in ("anomaly_score", "register_address", "payload_length",
+                    "transaction_id", "value", "function_code"):
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Boolean-like columns stored as "True"/"False" strings by the simulator
+        for col in ("is_write", "is_anomaly"):
+            if col in df.columns:
+                df[col] = df[col].map(
+                    lambda v: True if str(v).strip().lower() in ("true", "1") else False
+                )
+
         if "severity" not in df.columns:
             df["severity"] = "UNKNOWN"
+
         return df
