@@ -265,26 +265,26 @@ class IncrementalEventReader:
     def _to_dataframe(self) -> pd.DataFrame:
         if not self._buf:
             return pd.DataFrame()
-        df = pd.DataFrame(list(self._buf))
 
-        # Type coercion — csv.DictReader returns ALL values as strings.
-        # pd.read_csv() auto-infers types; we must be explicit here.
-        # IMPORTANT: Some Pandas builds use Arrow-backed StringDtype.
-        # map(lambda) on ArrowString returns ArrowString — not numpy bool.
-        # We use .astype(str).str.lower().isin() which ALWAYS returns
-        # a numpy-backed bool Series regardless of the storage backend.
+        # Force numpy-native dtypes from the start.
+        # pd.DataFrame(list_of_dicts) on Pandas 3.x with pyarrow installed uses
+        # ArrowDtype for string columns by default.  All downstream code
+        # (engineer_features, IncrementalScorer) was written for numpy dtypes.
+        # We convert the entire DataFrame to object dtype BEFORE any type
+        # coercion so Arrow never enters the pipeline.
+        df = pd.DataFrame(list(self._buf)).astype(object)
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        # Numeric columns
+        # Numeric columns — use pd.to_numeric after astype(object) guarantees str input
         for col in ("anomaly_score", "register_address", "payload_length",
                     "transaction_id", "value", "function_code"):
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str), errors="coerce")
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Boolean-like columns: force numpy int (0/1) so engineer_features'
-        # .astype(int) never encounters an ArrowString dtype.
+        # Boolean-like columns: "True"/"False" strings → int 0/1
+        # .astype(object) above ensures these are plain Python strings now.
         for col in ("is_write", "is_anomaly"):
             if col in df.columns:
                 df[col] = (
@@ -293,7 +293,7 @@ class IncrementalEventReader:
                     .str.strip()
                     .str.lower()
                     .isin(["true", "1"])
-                    .astype("int64")   # explicit numpy int — no Arrow involvement
+                    .astype(int)
                 )
 
         if "severity" not in df.columns:
