@@ -268,7 +268,11 @@ class IncrementalEventReader:
         df = pd.DataFrame(list(self._buf))
 
         # Type coercion — csv.DictReader returns ALL values as strings.
-        # pd.read_csv() used to auto-infer types; we must do it explicitly.
+        # pd.read_csv() auto-infers types; we must be explicit here.
+        # IMPORTANT: Some Pandas builds use Arrow-backed StringDtype.
+        # map(lambda) on ArrowString returns ArrowString — not numpy bool.
+        # We use .astype(str).str.lower().isin() which ALWAYS returns
+        # a numpy-backed bool Series regardless of the storage backend.
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -277,13 +281,19 @@ class IncrementalEventReader:
         for col in ("anomaly_score", "register_address", "payload_length",
                     "transaction_id", "value", "function_code"):
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df[col] = pd.to_numeric(df[col].astype(str), errors="coerce")
 
-        # Boolean-like columns stored as "True"/"False" strings by the simulator
+        # Boolean-like columns: force numpy int (0/1) so engineer_features'
+        # .astype(int) never encounters an ArrowString dtype.
         for col in ("is_write", "is_anomaly"):
             if col in df.columns:
-                df[col] = df[col].map(
-                    lambda v: True if str(v).strip().lower() in ("true", "1") else False
+                df[col] = (
+                    df[col]
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .isin(["true", "1"])
+                    .astype("int64")   # explicit numpy int — no Arrow involvement
                 )
 
         if "severity" not in df.columns:
