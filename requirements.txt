@@ -17,6 +17,7 @@ numpy>=1.24.0
 # LLM Integration
 anthropic>=0.30.0           # Claude API — cloud mode / high-severity analysis
 google-generativeai>=0.8.0  # Google Gemini API — free tier / ultra-fast showcase mode
+groq>=0.9.0                 # Groq API — LPU acceleration (fastest)
 ollama>=0.3                 # Ollama client — local/air-gapped mode
 
 # Dashboard
