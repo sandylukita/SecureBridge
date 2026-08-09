@@ -518,8 +518,11 @@ with tab1:
                 first_seen = datetime.now()
                 
             date_str = first_seen.strftime("%Y%m%d")
-            # Stable hash based on first_seen time instead of row count
-            raw_hash = f"{dst_ip}-{src_ip}-{first_seen.isoformat()}"
+            # STABLE HASH: Use date_str instead of exact microsecond timestamp.
+            # Because the 5k window is constantly sliding, the oldest event's timestamp
+            # will shift forward. If we hash the exact timestamp, the Incident ID
+            # changes every 10 seconds and AI results are lost.
+            raw_hash = f"{dst_ip}-{src_ip}-{date_str}"
             hash_hex = hashlib.md5(raw_hash.encode()).hexdigest()[:6].upper()
             incident_id = f"INC-{date_str}-{hash_hex}"
             
