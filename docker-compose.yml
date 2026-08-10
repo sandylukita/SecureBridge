@@ -139,7 +139,7 @@ services:
       dmz_zone:
         ipv4_address: 172.20.20.10
     volumes:
-      - ot_data:/app/data/logs:ro      # Read-only OT data
+      - ot_data:/app/data/logs         # Writable for demo injection
       - ml_models:/app/data/models:ro  # Read-only models
       - reports:/app/data/reports      # Write PDF reports
       - ./config:/app/config:ro
