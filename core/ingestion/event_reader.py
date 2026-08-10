@@ -254,7 +254,7 @@ class IncrementalEventReader:
             last_nl = raw_bytes.rfind(b"\n")
             if last_nl != -1:
                 raw_bytes = raw_bytes[: last_nl + 1]
-            rows = self._parse_csv_bytes(raw_bytes, filename, prev_offset=1)
+            rows = self._parse_csv_bytes(raw_bytes, filename, prev_offset=start_pos)
             self._buf.extend(rows[-self.window :])
             logger.info(f"[Reader] Replayed {len(self._buf)} rows into working set.")
         except Exception as exc:

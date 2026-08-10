@@ -824,8 +824,7 @@ class IncrementalScorer:
             safe_col("function_code") +
             safe_col("src_ip")
         )
-        df["_row_hash"] = hash_keys.apply(lambda k: hashlib.md5(k.encode()).hexdigest())
-
+        df["_row_hash"] = hash_keys.apply(lambda k: hashlib.md5(str(k).encode()).hexdigest())
         # Split: rows already in cache vs rows that need scoring
         cached_mask = df["_row_hash"].isin(self._cache)
         new_df      = df[~cached_mask].copy()

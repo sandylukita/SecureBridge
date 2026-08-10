@@ -285,6 +285,19 @@ with st.sidebar:
             use_container_width=True
         )
 
+    if config.mode != "live":
+        st.divider()
+        st.markdown("### 🎯 Red-Team Simulation")
+        if st.button("💉 Inject Network Scan", use_container_width=True):
+            import subprocess
+            subprocess.Popen([sys.executable, "inject_demo.py", "frequency"])
+            st.toast("Injected network scan (Skenario B) into event log! The dashboard will update shortly.", icon="🚨")
+            
+        if st.button("🔥 Inject Modbus Write", use_container_width=True):
+            import subprocess
+            subprocess.Popen([sys.executable, "inject_demo.py", "write"])
+            st.toast("Injected unauthorized write (Skenario C) into event log! The dashboard will update shortly.", icon="🚨")
+
     st.divider()
 
     st.markdown("### ⚙️ SOC Controls")
