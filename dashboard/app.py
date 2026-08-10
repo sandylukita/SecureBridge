@@ -210,6 +210,15 @@ def score_events(df: pd.DataFrame) -> pd.DataFrame:
     t_inc = time.time()
     scored = incremental.score_incremental(df)
     log.info(f"[TIMING] score_incremental only: {time.time()-t_inc:.2f}s")
+    
+    # Global Severity Capping for Known SCADA Read-Only Traffic
+    if not scored.empty and "src_ip" in scored.columns and "is_write" in scored.columns:
+        _is_write_bool = scored["is_write"].astype(str).str.strip().str.lower().isin(["true", "1", "1.0"])
+        mask_scada_read = (scored["src_ip"] == "192.168.10.100") & (~_is_write_bool)
+        mask_needs_cap = mask_scada_read & (scored["severity"].isin(["HIGH", "CRITICAL"]))
+        
+        if mask_needs_cap.any():
+            scored.loc[mask_needs_cap, "severity"] = "MEDIUM"
 
     t_reg = time.time()
     # Passively update asset registry from scored results (vectorized)
@@ -517,9 +526,6 @@ with tab1:
             if src_ip == "192.168.10.100":
                 if not is_write_detected:
                     role_label = "Source (SCADA)"
-                    # Cap severity at MEDIUM for known legitimate polling, regardless of ML score
-                    if sev in ["HIGH", "CRITICAL"]:
-                        sev = "MEDIUM"
                 else:
                     role_label = "Compromised SCADA"
             else:
@@ -618,12 +624,26 @@ with tab1:
 
                         # Interactive Firewall Playbook (Removed nested expander to fix Streamlit exception)
                         st.markdown("🛡️ **Preview Firewall Containment Rule**")
-                        st.code(f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
+                        
+                        if role_label == "Source (SCADA)":
+                            fw_text = f"""# No containment action recommended
+# Source {src_ip} is a known legitimate SCADA workstation performing routine read operations.
+# If polling frequency is a concern, investigate SCADA configuration — do NOT block this source.
+"""
+                        elif role_label == "Suspicious Source":
+                            fw_text = f"""# Monitoring Rule (Non-blocking) — Suspicious Activity
+# Log and alert on continued activity from {src_ip}
+# Recommend manual investigation before containment
+iptables -A FORWARD -s {src_ip} -d {dst_ip} -j LOG --log-prefix "SECUREBRIDGE-WATCH: "
+"""
+                        else:
+                            fw_text = f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
 # Block unauthorized traffic from {src_ip} to {dst_ip}
 iptables -A FORWARD -s {src_ip} -d {dst_ip} -p tcp --dport 502 -j DROP
 # Log containment action
 logger -t SECUREBRIDGE "CONTAINMENT: Blocked attacker {src_ip} targeting {dst_ip}"
-""", language="bash")
+"""
+                        st.code(fw_text, language="bash")
     else:
         st.success("✅ No active alerts above threshold. Network operations normal.")
 
