@@ -107,7 +107,9 @@ grouped by the source and destination asset.
 INCIDENT SUMMARY:
 - Incident ID: {incident_id}
 - Target Asset (Destination): {dst_ip}
-- Source Asset (Attacker): {src_ip}
+- Source Asset: {src_ip}
+- Source Classification (Role): {role_label}
+{role_context_note}
 - Total Alerts in Window: {alert_count}
 - Highest Severity: {severity} (Score: {max_score}/100)
 - Protocol(s): {protocols}
@@ -227,15 +229,50 @@ def _build_incident_summary(incident: dict) -> str:
 
     return "\n".join(summary_lines)
 
+def _build_role_context_note(role_label: str, is_write: bool) -> str:
+    """Build context notes for the LLM based on source classification."""
+    if role_label == "Source (SCADA)" and not is_write:
+        return (
+            "NOTE: This traffic originates from a KNOWN, LEGITIMATE "
+            "SCADA workstation performing READ-ONLY polling. This is "
+            "NOT an attack. Your analysis should reflect this — do NOT "
+            "recommend isolating or blocking this source. Frame this as "
+            "routine operational traffic, and if volume is unusually "
+            "high, recommend investigating WHY polling frequency "
+            "increased, not blocking the source."
+        )
+    elif role_label == "Suspicious Source":
+        return (
+            "NOTE: This source IP is unrecognized and exhibits abnormal "
+            "behavior (e.g., unusual frequency) but has NOT executed any "
+            "write commands. Treat as reconnaissance/scanning risk, "
+            "not confirmed compromise."
+        )
+    elif role_label == "Attacker" or role_label == "Compromised SCADA":
+        return (
+            "NOTE: This source has been confirmed to execute unauthorized "
+            "write commands. Treat as active threat requiring immediate "
+            "containment."
+        )
+    return ""
+
+
 def _build_incident_prompt(incident: dict) -> str:
     """Render INCIDENT_ANALYSIS_PROMPT with compressed incident data."""
     alerts = incident.get("alerts", [])
     protocols = list(set(alt.get("protocol", "Modbus TCP") for alt in alerts))
     
+    # Extract role info to build prompt context
+    role_label = incident.get("role_label", "Unknown Source")
+    is_write = any(alt.get("is_write", False) for alt in alerts)
+    role_context_note = _build_role_context_note(role_label, is_write)
+    
     return INCIDENT_ANALYSIS_PROMPT.format(
         incident_id=incident.get("incident_id", "Unknown"),
         dst_ip=incident.get("target_ip", "Unknown"),
         src_ip=incident.get("source_ip", "Unknown"),
+        role_label=role_label,
+        role_context_note=role_context_note,
         alert_count=incident.get("alert_count", 0),
         severity=incident.get("severity", "UNKNOWN"),
         max_score=incident.get("max_score", 0.0),

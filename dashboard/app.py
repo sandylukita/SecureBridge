@@ -511,38 +511,17 @@ with tab1:
             max_score = float(rep_alert.get("anomaly_score", 0.0))
             dev_id = rep_alert.get("device_id", "PLC-01")
             
-            # Generate deterministic Incident ID
-            if "timestamp" in group_df.columns:
-                first_seen = group_df["timestamp"].min()
-            else:
-                first_seen = datetime.now()
-                
-            date_str = first_seen.strftime("%Y%m%d")
-            # STABLE HASH: Use date_str instead of exact microsecond timestamp.
-            # Because the 5k window is constantly sliding, the oldest event's timestamp
-            # will shift forward. If we hash the exact timestamp, the Incident ID
-            # changes every 10 seconds and AI results are lost.
-            raw_hash = f"{dst_ip}-{src_ip}-{date_str}"
-            hash_hex = hashlib.md5(raw_hash.encode()).hexdigest()[:6].upper()
-            incident_id = f"INC-{date_str}-{hash_hex}"
-            
-            # Build Batch Object
-            incident_dict = {
-                "incident_id": incident_id,
-                "target_ip": dst_ip,
-                "target_device_id": dev_id,
-                "source_ip": src_ip,
-                "alert_count": len(group_df),
-                "severity": sev,
-                "max_score": max_score,
-                "alerts": group_df.to_dict("records")
-            }
-            
-            # Context-Aware Semantic Role & Emoji
+            # Context-Aware Semantic Role & Severity Capping
             is_write_detected = bool(group_df["is_write"].any())
             
             if src_ip == "192.168.10.100":
-                role_label = "Compromised SCADA" if is_write_detected else "Source (SCADA)"
+                if not is_write_detected:
+                    role_label = "Source (SCADA)"
+                    # Cap severity at MEDIUM for known legitimate polling, regardless of ML score
+                    if sev in ["HIGH", "CRITICAL"]:
+                        sev = "MEDIUM"
+                else:
+                    role_label = "Compromised SCADA"
             else:
                 if is_write_detected:
                     role_label = "Attacker"
@@ -550,7 +529,7 @@ with tab1:
                     role_label = "Suspicious Source"
                 else:
                     role_label = "Source"
-                    
+
             if sev == "CRITICAL":
                 emoji = "🚨"
             elif sev == "HIGH":
@@ -560,6 +539,30 @@ with tab1:
             else:
                 emoji = "🟢"
                 
+            # Generate deterministic Incident ID
+            if "timestamp" in group_df.columns:
+                first_seen = group_df["timestamp"].min()
+            else:
+                first_seen = datetime.now()
+                
+            date_str = first_seen.strftime("%Y%m%d")
+            raw_hash = f"{dst_ip}-{src_ip}-{date_str}"
+            hash_hex = hashlib.md5(raw_hash.encode()).hexdigest()[:6].upper()
+            incident_id = f"INC-{date_str}-{hash_hex}"
+            
+            # Build Batch Object (Now includes role_label for the LLM)
+            incident_dict = {
+                "incident_id": incident_id,
+                "target_ip": dst_ip,
+                "target_device_id": dev_id,
+                "source_ip": src_ip,
+                "alert_count": len(group_df),
+                "severity": sev,
+                "max_score": max_score,
+                "role_label": role_label,
+                "alerts": group_df.to_dict("records")
+            }
+            
             expander_title = f"{emoji} [{sev}] {incident_id} | Target: {dev_id} ({dst_ip}) | {role_label}: {src_ip} | Alerts: {len(group_df)}"
             
             # Keep expander open if AI analysis exists, OR if the button was just clicked
