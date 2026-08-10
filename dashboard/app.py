@@ -538,7 +538,29 @@ with tab1:
                 "alerts": group_df.to_dict("records")
             }
             
-            expander_title = f"🔴 [{sev}] {incident_id} | Target: {dev_id} ({dst_ip}) | Attacker: {src_ip} | Alerts: {len(group_df)}"
+            # Context-Aware Semantic Role & Emoji
+            is_write_detected = bool(group_df["is_write"].any())
+            
+            if src_ip == "192.168.10.100":
+                role_label = "Compromised SCADA" if is_write_detected else "Source (SCADA)"
+            else:
+                if is_write_detected:
+                    role_label = "Attacker"
+                elif sev in ["HIGH", "CRITICAL"]:
+                    role_label = "Suspicious Source"
+                else:
+                    role_label = "Source"
+                    
+            if sev == "CRITICAL":
+                emoji = "🚨"
+            elif sev == "HIGH":
+                emoji = "🔴"
+            elif sev == "MEDIUM":
+                emoji = "🟡"
+            else:
+                emoji = "🟢"
+                
+            expander_title = f"{emoji} [{sev}] {incident_id} | Target: {dev_id} ({dst_ip}) | {role_label}: {src_ip} | Alerts: {len(group_df)}"
             
             # Keep expander open if AI analysis exists, OR if the button was just clicked
             is_button_clicked = st.session_state.get(f"btn_ai_{incident_id}", False)
@@ -636,10 +658,9 @@ with tab2:
             size=[35] * len(nodes_df),
             hover_name="label",
             hover_data=["type", "level", "max_score"],
-            color_discrete_map={"ONLINE": "#00e676", "WARNING": "#ff9100", "CRITICAL": "#ff1744"},
-            text="label"
+            color_discrete_map={"ONLINE": "#00e676", "WARNING": "#ff9100", "CRITICAL": "#ff1744"}
         )
-        fig_topo.update_traces(textposition="top center", marker=dict(line=dict(width=2, color="white")))
+        fig_topo.update_traces(marker=dict(line=dict(width=2, color="white")))
         fig_topo.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(15,23,42,0.8)",
