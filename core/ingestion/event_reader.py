@@ -217,9 +217,14 @@ class IncrementalEventReader:
 
         if prev_offset == 0:
             reader_obj = csv.DictReader(io.StringIO(text))
+            fieldnames = reader_obj.fieldnames
+            if fieldnames and fieldnames[0].lower() != "timestamp":
+                # First line was NOT a header, it was data!
+                fieldnames = self.EXPECTED_COLUMNS
+                reader_obj = csv.DictReader(io.StringIO(text), fieldnames=fieldnames)
             rows = list(reader_obj)
-            if reader_obj.fieldnames:
-                self._state["reader"]["_fieldnames"] = list(reader_obj.fieldnames)
+            if fieldnames:
+                self._state["reader"]["_fieldnames"] = list(fieldnames)
         else:
             fieldnames = self._state["reader"].get("_fieldnames")
             if not fieldnames:

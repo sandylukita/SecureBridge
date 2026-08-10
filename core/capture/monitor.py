@@ -496,6 +496,8 @@ class EventLogger:
         if event.data.get("anomaly_injected"):
             self._stats["anomalies"] += 1
 
+        self._init_file()  # Ensure header is written if file was deleted
+
         with open(self.log_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
