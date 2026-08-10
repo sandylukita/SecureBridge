@@ -46,6 +46,12 @@ logger = logging.getLogger("SecureBridge.IncrementalEventReader")
 
 WINDOW_SIZE        = 5_000
 DEFAULT_STATE_PATH = "data/models/event_counters.json"
+EXPECTED_COLUMNS = [
+    "timestamp", "src_ip", "dst_ip", "protocol", "event_type",
+    "unit_id", "function_code", "function_name", "register_address",
+    "value", "device_id", "payload_length", "raw_size",
+    "is_write", "transaction_id", "anomaly_injected"
+]
 
 _EMPTY_STATE: dict = {
     "total_events":   0,
@@ -220,7 +226,7 @@ class IncrementalEventReader:
             fieldnames = reader_obj.fieldnames
             if fieldnames and fieldnames[0].lower() != "timestamp":
                 # First line was NOT a header, it was data!
-                fieldnames = self.EXPECTED_COLUMNS
+                fieldnames = EXPECTED_COLUMNS
                 reader_obj = csv.DictReader(io.StringIO(text), fieldnames=fieldnames)
             rows = list(reader_obj)
             if fieldnames:
