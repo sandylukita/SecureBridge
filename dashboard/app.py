@@ -41,6 +41,11 @@ from compliance.iec62443_mapper import (
     calculate_compliance_score
 )
 
+import logging
+import time
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("SecureBridge.Timing")
+
 # ─────────────────────────────────────────────────────────
 # Page Config
 # ─────────────────────────────────────────────────────────
@@ -333,13 +338,7 @@ with st.sidebar:
     st.caption(f"Model: {model_str}")
 
 # ─────────────────────────────────────────────────────────
-# Main Content & Header
 # ─────────────────────────────────────────────────────────
-
-import time
-import logging
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("SecureBridge.Timing")
 
 t_start = time.time()
 df_raw = load_events(hours_back)
