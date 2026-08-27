@@ -292,16 +292,17 @@ with st.sidebar:
 
     if config.mode != "live":
         st.divider()
-        st.markdown("### 🎯 Red-Team Simulation")
-        if st.button("💉 Inject Network Scan", use_container_width=True):
-            import subprocess
-            subprocess.Popen([sys.executable, "inject_demo.py", "frequency"])
-            st.toast("Injected network scan (Skenario B) into event log! The dashboard will update shortly.", icon="🚨")
-            
-        if st.button("🔥 Inject Modbus Write", use_container_width=True):
-            import subprocess
-            subprocess.Popen([sys.executable, "inject_demo.py", "write"])
-            st.toast("Injected unauthorized write (Skenario C) into event log! The dashboard will update shortly.", icon="🚨")
+        with st.expander("🛠️ Developer Tools [Internal]"):
+            st.caption("Internal test harness — not shown in executive/operations view.")
+            if st.button("💉 Inject Network Scan", use_container_width=True):
+                import subprocess
+                subprocess.Popen([sys.executable, "inject_demo.py", "frequency"])
+                st.toast("Injected network scan into event log!", icon="🚨")
+
+            if st.button("🔥 Inject Modbus Write", use_container_width=True):
+                import subprocess
+                subprocess.Popen([sys.executable, "inject_demo.py", "write"])
+                st.toast("Injected unauthorized write into event log!", icon="🚨")
 
     st.divider()
 
@@ -508,7 +509,7 @@ with tab1:
             st.plotly_chart(fig_pie, use_container_width=True)
 
     # Active Alerts List with AI Analysis & DPI Details
-    st.markdown("#### 🚨 Active Security Incidents & AI Threat Analysis")
+    st.markdown("#### 🔴 Active OT Security Incidents")
     if not active_alerts.empty:
         # ── INCIDENT STRATEGY: Group by Asset Pair (Target + Source) ──
         # This replaces the O(N) per-alert LLM calls with O(1) batched incident calls
@@ -590,23 +591,60 @@ with tab1:
                 col_left, col_right = st.columns(2)
                 
                 with col_left:
-                    st.markdown("**📊 Incident Timeline (Compressed DPI)**")
-                    st.json({
-                        "Incident ID": incident_id,
-                        "Target Asset": dst_ip,
-                        "Source Asset": src_ip,
-                        "Time Window": f"Last {hours_back_default if 'hours_back_default' in locals() else 24} Hours",
-                        "Total Alerts": len(group_df),
-                        "Max Anomaly Score": f"{max_score:.1f} / 100",
-                        "Representative Event": rep_alert.get("function_name", "Unknown Function"),
-                        "Is Write Command Detected": bool(group_df["is_write"].any())
-                    })
+                    write_detected = bool(group_df["is_write"].any())
+                    fc_name = rep_alert.get("function_name", "Unknown Function")
+
+                    # Build risk indicators list
+                    indicators = []
+                    if write_detected:
+                        indicators.append("⚠️ Write command detected")
+                    if max_score >= 80:
+                        indicators.append(f"🔴 Very high anomaly score ({max_score:.1f}/100)")
+                    elif max_score >= 60:
+                        indicators.append(f"🟠 Elevated anomaly score ({max_score:.1f}/100)")
+                    else:
+                        indicators.append(f"🟡 Anomaly score: {max_score:.1f}/100")
+                    indicators.append(f"📡 Function: {fc_name}")
+                    indicators.append(f"🔗 Source → Target: {src_ip} → {dst_ip}")
+                    if role_label in ["Attacker", "Compromised SCADA"]:
+                        indicators.append("🚨 Source classified as active threat")
+                    elif role_label == "Suspicious Source":
+                        indicators.append("⚠️ Source unrecognized — possible unauthorized device")
+
+                    # Operational context per role
+                    if role_label == "Source (SCADA)":
+                        op_context = "Known SCADA workstation. Elevated activity may indicate configuration change, maintenance window, or HMI polling adjustment."
+                    elif role_label == "Suspicious Source":
+                        op_context = "Unrecognized source IP performing read operations. May indicate unauthorized device, rogue engineering laptop, or reconnaissance activity."
+                    elif role_label == "Compromised SCADA":
+                        op_context = "Known SCADA workstation executing write commands — deviates from expected read-only role. Possible compromise or unauthorized operator action."
+                    elif role_label == "Attacker":
+                        op_context = "Unknown source executing write commands to OT device. Represents potential unauthorized control action requiring immediate investigation."
+                    else:
+                        op_context = "Source exhibiting anomalous behavior relative to established baseline."
+
+                    indicators_html = "".join(
+                        f'<div style="font-size:12px;color:#e0e6ed;margin-bottom:3px;">{ind}</div>'
+                        for ind in indicators
+                    )
+                    st.markdown(f"""
+<div style="background:rgba(15,23,42,0.6);border:1px solid #2a3d66;border-radius:8px;padding:14px;margin-bottom:10px;">
+    <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">📋 Incident Details</div>
+    <div style="font-size:12px;color:#e0e6ed;margin-bottom:4px;"><b>ID:</b> {incident_id}</div>
+    <div style="font-size:12px;color:#e0e6ed;margin-bottom:4px;"><b>Target:</b> {dev_id} ({dst_ip})</div>
+    <div style="font-size:12px;color:#e0e6ed;margin-bottom:12px;"><b>Source:</b> {role_label} ({src_ip})</div>
+    <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">🔍 Risk Indicators</div>
+    {indicators_html}
+    <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-top:10px;margin-bottom:6px;">⚙️ Operational Context</div>
+    <div style="font-size:12px;color:#94a3b8;font-style:italic;">{op_context}</div>
+</div>
+""", unsafe_allow_html=True)
 
                 with col_right:
                     st.markdown("**🤖 Incident Analyst & Playbook**")
                     if ai_enabled:
                         if st.button(f"Generate AI Analysis", key=f"btn_ai_{incident_id}", type="primary"):
-                            with st.spinner("🤖 Incident Analyst sedang memproses batch..."):
+                            with st.spinner("🤖 Analyzing incident..."):
                                 analysis = get_cached_incident_analysis_v3(incident_dict, config.llm.provider)
                                 st.session_state["ai_results"][incident_id] = analysis
                         
@@ -635,25 +673,44 @@ with tab1:
                             st.info("💡 Klik tombol di atas untuk menjalankan AI Incident Analyst pada batch ini.")
 
                         # Interactive Firewall Playbook (Removed nested expander to fix Streamlit exception)
-                        st.markdown("🛡️ **Preview Firewall Containment Rule**")
+                        st.markdown("🎯 **Recommended Response**")
                         
                         if role_label == "Source (SCADA)":
-                            fw_text = f"""# No containment action recommended
-# Source {src_ip} is a known legitimate SCADA workstation performing routine read operations.
-# If polling frequency is a concern, investigate SCADA configuration — do NOT block this source.
+                            fw_text = f"""# MONITOR ONLY — No containment action recommended
+# Source {src_ip} is a known legitimate SCADA workstation.
+# If polling frequency is a concern, investigate SCADA configuration.
+# Do NOT block or isolate this source without confirming operational impact.
 """
                         elif role_label == "Suspicious Source":
-                            fw_text = f"""# Monitoring Rule (Non-blocking) — Suspicious Activity
-# Log and alert on continued activity from {src_ip}
-# Recommend manual investigation before containment
-iptables -A FORWARD -s {src_ip} -d {dst_ip} -j LOG --log-prefix "SECUREBRIDGE-WATCH: "
+                            fw_text = f"""# INVESTIGATE → VALIDATE → CONTAIN
+#
+# Step 1 — INVESTIGATE
+#   Verify if {src_ip} is an authorized device
+#   (engineering laptop, new HMI, maintenance tool, etc.)
+#   Review communication history and timing patterns.
+#
+# Step 2 — VALIDATE
+#   Confirm with plant/operations whether this activity is authorized.
+#   Check maintenance logs and active work orders.
+#
+# Step 3 — CONTAIN (only if unauthorized confirmed)
+#   iptables -A FORWARD -s {src_ip} -d {dst_ip} -j LOG --log-prefix "SECUREBRIDGE-WATCH: "
+#
+# NOTE: Do not block automatically. Validate operational authorization first.
 """
                         else:
-                            fw_text = f"""# Automated Edge Firewall Rule (DMZ Level 3.5 Isolation)
-# Block unauthorized traffic from {src_ip} to {dst_ip}
-iptables -A FORWARD -s {src_ip} -d {dst_ip} -p tcp --dport 502 -j DROP
-# Log containment action
-logger -t SECUREBRIDGE "CONTAINMENT: Blocked attacker {src_ip} targeting {dst_ip}"
+                            fw_text = f"""# VALIDATE AUTHORIZATION → CONTAIN IF UNAUTHORIZED
+#
+# WARNING: Do not automatically block {src_ip} without confirming
+# that no authorized maintenance or engineering activity is active.
+#
+# Step 1 — VALIDATE operational authorization
+#   Confirm write operation is NOT part of scheduled maintenance.
+#   Verify operator session and active work order.
+#
+# Step 2 — CONTAIN (if unauthorized confirmed)
+#   iptables -A FORWARD -s {src_ip} -d {dst_ip} -p tcp --dport 502 -j DROP
+#   logger -t SECUREBRIDGE "CONTAINMENT: Blocked {src_ip} targeting {dst_ip}"
 """
                         st.code(fw_text, language="bash")
     else:

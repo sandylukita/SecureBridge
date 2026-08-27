@@ -12,7 +12,7 @@ simulator:
   enabled: true
   plc_count: 3
   polling_interval: 5            # seconds
-  inject_anomalies: false        # Set true for demo
+  inject_anomalies: true         # Auto-inject OT incident scenarios for demo
 
 detection:
   anomaly_threshold: 60.0        # 0-100 score

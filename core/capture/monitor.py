@@ -333,10 +333,20 @@ class LabSimulator:
     Generates realistic Modbus polling patterns
     """
 
-    def __init__(self, event_queue: Queue, plc_count: int = 3):
+    def __init__(self, event_queue: Queue, plc_count: int = 3,
+                 inject_anomalies: bool = False):
         self.event_queue = event_queue
         self.plc_count = plc_count
         self.running = False
+        self.inject_anomalies = inject_anomalies
+
+        # Auto-inject rotation state
+        self._inject_scenarios = [
+            "write", "frequency", "discovery", "burst", "cross_plc", "baseline_dev"
+        ]
+        self._inject_scenario_idx = 0
+        self._inject_interval  = 20   # cycles between injections (20 × 5s = 100s ≈ 1.7 min)
+        self._inject_start     = 5    # first injection at cycle 5 (25 seconds after start)
 
         # Simulated PLCs
         self.plcs = [
@@ -358,6 +368,11 @@ class LabSimulator:
         """Start simulation"""
         self.running = True
         logger.info(f"Lab simulator started — {self.plc_count} simulated PLCs")
+        if self.inject_anomalies:
+            logger.info(
+                f"[AUTO-INJECT] Enabled — first injection at cycle {self._inject_start}, "
+                f"then every {self._inject_interval} cycles ({self._inject_interval * 5}s)"
+            )
 
         import random
         cycle = 0
@@ -395,10 +410,30 @@ class LabSimulator:
                     )
                     self.event_queue.put(event)
 
+            # ── Auto-inject anomaly scenarios (demo mode) ─────────────────────
+            if self.inject_anomalies:
+                if (cycle >= self._inject_start and
+                        (cycle - self._inject_start) % self._inject_interval == 0):
+                    scenario = self._inject_scenarios[
+                        self._inject_scenario_idx % len(self._inject_scenarios)
+                    ]
+                    logger.info(f"[AUTO-INJECT] Cycle {cycle} — injecting scenario: {scenario}")
+                    self.inject_anomaly(scenario)
+                    self._inject_scenario_idx += 1
+
             time.sleep(5)
 
     def inject_anomaly(self, anomaly_type: str = "frequency"):
-        """Inject anomaly for demo purposes"""
+        """Inject anomaly scenario into the event queue.
+
+        Supported types:
+            frequency    — Rapid polling / network scan (src: 192.168.10.199)
+            write        — Unauthorized Modbus write command (src: 192.168.10.199)
+            discovery    — Abnormal FC43 device identification / recon (src: 192.168.10.198)
+            burst        — Traffic burst / DoS pattern (src: 192.168.10.197)
+            cross_plc    — SCADA accessing unexpected PLC-03 (src: 192.168.10.100)
+            baseline_dev — Unusual high register access pattern (src: 192.168.10.196)
+        """
         import random
 
         if anomaly_type == "frequency":
@@ -452,6 +487,114 @@ class LabSimulator:
                 }
             )
             self.event_queue.put(event)
+
+        elif anomaly_type == "discovery":
+            # Abnormal Function Code FC43 — device recon / discovery scan
+            logger.warning("INJECTING: Abnormal Function Code FC43 — device identification/recon")
+            plc = self.plcs[0]
+            for i in range(5):
+                event = OTEvent(
+                    src_ip="192.168.10.198",  # Unknown recon source
+                    dst_ip=plc["ip"],
+                    protocol="Modbus TCP",
+                    event_type="MODBUS_DISCOVERY",
+                    data={
+                        "unit_id": 0,
+                        "function_code": 43,
+                        "function_name": "Read Device Identification",
+                        "register_address": 0,
+                        "value": 0,
+                        "device_id": plc["device_id"],
+                        "payload_length": 8,
+                        "raw_size": 16,
+                        "transaction_id": 8000 + i,
+                        "is_write": False,
+                        "anomaly_injected": True,
+                    }
+                )
+                self.event_queue.put(event)
+                time.sleep(0.2)
+
+        elif anomaly_type == "burst":
+            # Traffic burst — DoS / availability risk pattern
+            logger.warning("INJECTING: Traffic Burst / DoS pattern")
+            plc = self.plcs[1]  # PLC-02
+            for i in range(30):
+                event = OTEvent(
+                    src_ip="192.168.10.197",  # Unknown burst source
+                    dst_ip=plc["ip"],
+                    protocol="Modbus TCP",
+                    event_type="MODBUS_READ",
+                    data={
+                        "unit_id": plc["unit_id"],
+                        "function_code": 3,
+                        "function_name": "Read Holding Registers",
+                        "register_address": 40001,
+                        "value": 0,
+                        "device_id": plc["device_id"],
+                        "payload_length": 12,
+                        "raw_size": 20,
+                        "transaction_id": 7000 + i,
+                        "is_write": False,
+                        "anomaly_injected": True,
+                    }
+                )
+                self.event_queue.put(event)
+                time.sleep(0.05)  # 50ms = burst / sub-100ms pattern
+
+        elif anomaly_type == "cross_plc":
+            # SCADA workstation accessing unexpected PLC (communication deviation)
+            logger.warning("INJECTING: SCADA Workstation accessing unexpected PLC-03")
+            plc = self.plcs[2]  # PLC-03 — unusual target for SCADA
+            for i in range(8):
+                event = OTEvent(
+                    src_ip="192.168.10.100",  # Known SCADA — but unusual target
+                    dst_ip=plc["ip"],
+                    protocol="Modbus TCP",
+                    event_type="MODBUS_READ",
+                    data={
+                        "unit_id": plc["unit_id"],
+                        "function_code": 3,
+                        "function_name": "Read Holding Registers",
+                        "register_address": 49999,  # Unusual high register
+                        "value": 0,
+                        "device_id": plc["device_id"],
+                        "payload_length": 12,
+                        "raw_size": 20,
+                        "transaction_id": 6000 + i,
+                        "is_write": False,
+                        "anomaly_injected": True,
+                    }
+                )
+                self.event_queue.put(event)
+                time.sleep(0.3)
+
+        elif anomaly_type == "baseline_dev":
+            # Baseline deviation — unusual register access pattern
+            logger.warning("INJECTING: Baseline Deviation — unusual register access pattern")
+            plc = self.plcs[0]
+            for i in range(10):
+                event = OTEvent(
+                    src_ip="192.168.10.196",  # Unknown source
+                    dst_ip=plc["ip"],
+                    protocol="Modbus TCP",
+                    event_type="MODBUS_READ",
+                    data={
+                        "unit_id": plc["unit_id"],
+                        "function_code": 3,
+                        "function_name": "Read Holding Registers",
+                        "register_address": 45000 + (i * 100),  # High addresses outside normal range
+                        "value": random.randint(0, 100),
+                        "device_id": plc["device_id"],
+                        "payload_length": 12,
+                        "raw_size": 20,
+                        "transaction_id": 5000 + i,
+                        "is_write": False,
+                        "anomaly_injected": True,
+                    }
+                )
+                self.event_queue.put(event)
+                time.sleep(0.5)
 
     def stop(self):
         self.running = False
@@ -559,7 +702,11 @@ def run_monitor(config_path: str = "config/lab.yaml"):
         )
 
     else:
-        simulator = LabSimulator(event_queue, plc_count=3)
+        simulator = LabSimulator(
+            event_queue,
+            plc_count=config.simulator.plc_count,
+            inject_anomalies=config.simulator.inject_anomalies,
+        )
         sim_thread = threading.Thread(
             target=simulator.start, daemon=True
         )

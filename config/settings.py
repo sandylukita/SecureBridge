@@ -52,6 +52,14 @@ class AlertConfig:
 
 
 @dataclass
+class SimulatorConfig:
+    enabled: bool = True
+    plc_count: int = 3
+    polling_interval: int = 5
+    inject_anomalies: bool = False   # Set True for demo: auto-injects OT incident scenarios
+
+
+@dataclass
 class DashboardConfig:
     host: str = "0.0.0.0"
     port: int = 8501
@@ -98,6 +106,7 @@ class SecureBridgeConfig:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     compliance: ComplianceConfig = field(default_factory=ComplianceConfig)
+    simulator: SimulatorConfig = field(default_factory=SimulatorConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     log_dir: str = "data/logs"
     data_dir: str = "data"
@@ -128,6 +137,15 @@ def load_config(config_path: str = "config/active.yaml") -> SecureBridgeConfig:
                 "bpf_filter",
                 "tcp port 502 or tcp port 44818 or udp port 47808"
             ),
+        )
+
+    if "simulator" in raw:
+        s = raw["simulator"]
+        config.simulator = SimulatorConfig(
+            enabled=s.get("enabled", True),
+            plc_count=s.get("plc_count", 3),
+            polling_interval=s.get("polling_interval", 5),
+            inject_anomalies=s.get("inject_anomalies", False),
         )
 
     if "detection" in raw:
