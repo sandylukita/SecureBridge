@@ -38,10 +38,11 @@ compliance:
 llm:
   provider: auto                   # groq | auto | gemini | claude | ollama | air-gapped
   groq_model: llama-3.1-8b-instant  # Fast & universally available on Groq free tier
-  gemini_model: gemini-flash-latest # Free tier & ultra-fast for showcase (needs GEMINI_API_KEY)
+  gemini_model: gemini-1.5-flash    # Stable free-tier model (not gemini-flash-latest alias)
   ollama_model: qwen2.5:3b       # Local model (run: ollama pull qwen2.5:3b)
   ollama_host: http://localhost:11434
   claude_model: claude-sonnet-4-6
+  api_timeout: 15                  # Increased for Azure network latency
 
 log_dir: "data/logs"
 data_dir: "data"
