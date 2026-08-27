@@ -2,7 +2,8 @@
 ### AI-Powered OT/ICS Security Command Center & Compliance Platform
 
 > **Built by:** Sandy Lukita | PT Optima Sarana Instrument  
-> **Status:** Technology Demonstrator | Architecture Validated | Azure Showcase Ready  
+> **Live Demo:** [http://securebridge.koreacentral.cloudapp.azure.com:8501/](http://securebridge.koreacentral.cloudapp.azure.com:8501/)  
+> **Status:** Technology Demonstrator | Architecture Validated | Azure Showcase Live  
 > **Version:** 1.7.0  
 
 ---
@@ -188,17 +189,19 @@ Audit-ready compliance reporting:
 
 ## 🛡️ Case Study & Real-World Scenario Compliance
 
-SecureBridge has been validated against seven internally defined OT security scenarios documented in [`study-case.md`](docs/study-case.md):
+SecureBridge has been verified against seven internally authored operational OT security scenarios documented in [`study-case.md`](study-case.md), simulating real-world industrial threat vectors:
 
 | Scenario | Focus Area | Verification Status | Key Capability |
 |---|---|:---:|---|
-| **Scenario 1** | IEC 62443 Audit & Air-Gapped Deployment | ✅ **Validated** | Local Ollama (`llama3.1`) + PDF report generator |
-| **Scenario 2** | IT Ransomware Spreading to Industrial DMZ | ✅ **Validated** | Burst/scan detection + Level 3.5 containment playbook |
-| **Scenario 3** | Rogue Contractor & Physical Bypass | ✅ **Validated** | Wire-level Pyshark DPI + `value_deviation` outlier scoring |
-| **Scenario 4** | Safety Interlock Bypass & Logic Tampering | ✅ **Validated** | FC=15/16/43 high-risk weighting + integrity warning playbook |
-| **Scenario 5** | Multi-Site Remote Infrastructure (GCC Grid) | ✅ **Validated** | On-premise Edge processing + lightweight <2KB alert JSON |
-| **Scenario 6** | Air-Gapped Notification & Local Routing | ✅ **Validated** | Zero external inbound/outbound cloud dependency |
-| **Scenario 7** | Supply Chain Attack & Trojanized Firmware | ✅ **Validated** | Signature-independent behavioral baseline (Isolation Forest) |
+| **Scenario 1** | IEC 62443 Audit & Air-Gapped Deployment | ✅ **Verified** | Local Ollama (`qwen2.5`) + PDF report generator |
+| **Scenario 2** | IT Ransomware Spreading to Industrial DMZ | ✅ **Verified** | Burst/scan detection + Level 3.5 containment playbook |
+| **Scenario 3** | Rogue Contractor & Physical Bypass | ✅ **Verified** | Wire-level Pyshark DPI + `value_deviation` outlier scoring |
+| **Scenario 4** | Safety Interlock Bypass & Logic Tampering | ✅ **Verified** | FC=15/16/43 high-risk weighting + integrity warning playbook |
+| **Scenario 5** | Multi-Site Remote Infrastructure (GCC Grid) | ✅ **Verified** | On-premise Edge processing + lightweight <2KB alert JSON |
+| **Scenario 6** | Air-Gapped Notification & Local Routing | ✅ **Verified** | Zero external inbound/outbound cloud dependency |
+| **Scenario 7** | Supply Chain Attack & Trojanized Firmware | ✅ **Verified** | Signature-independent behavioral baseline (Isolation Forest) |
+
+*> Note: Scenarios are internally authored test vectors verified against SecureBridge behavioral detection rules, deterministic mapping, and synthetic OT traffic datasets.*
 
 ---
 
@@ -213,10 +216,13 @@ The initial version implemented a straightforward event-based pattern. If an att
 V2 transitioned the backend into an `O(1)` Incident-Based Batching pattern. The **IncidentAnalyst** grouped anomalies into highly contextual **Incidents** (e.g., grouped by Source IP + Target IP). Identical sequence steps were compressed into a summary before passing it to the LLM. 
 *The Flaw:* While this bypassed rate limiting, the AI was invoked *automatically in the Streamlit render loop*. If a refresh brought in 4 incidents, the UI would freeze for 10-15 seconds waiting for all LLMs to return before the dashboard even appeared.
 
-**V3: On-Demand Deterministic Rendering + Async Persistence (Current)**
+**V3: On-Demand Deterministic Rendering + Async Persistence**
 To achieve true "SIEM-grade" responsiveness, V3 completely decouples AI from the initial render path:
 1. **On-Demand AI:** The dashboard loads instantly (<3 seconds), displaying only deterministic facts (timeline, protocol, MITRE mappings). The LLM is strictly invoked as an **On-Demand Detective** only when the analyst explicitly clicks "Generate AI Investigation".
-2. **Asynchronous SIEM Caching:** In V2, incremental scoring on 100k+ events was bottlenecked by a synchronous `pickle.dump()` cache save, causing massive UI freezes. V3 moves this entirely to a thread-safe asynchronous background process, dropping ML scoring UI-blocking latency from ~13s to ~3s.
+2. **Asynchronous SIEM Caching:** In V2, incremental scoring on 100k+ events was bottlenecked by a synchronous `pickle.dump()` cache save. V3 moves disk persistence to a non-blocking background daemon thread with mutex locks, ensuring UI refresh latency stays under ~3 seconds.
+
+**V3.1: 4-Layer Semantic & Data Integrity Alignment (Current)**
+Enforces strict end-to-end synchronization across all operational layers: (1) Normal distribution Anomaly Scoring, (2) Deterministic Threat Labelling, (3) LLM Grounded Prompt Reasoning, and (4) Actionable Firewall Remediation. This eliminates cross-layer semantic discrepancies between statistical ML anomalies and defensive recommendations.
 
 ---
 
@@ -293,9 +299,11 @@ mode: lab
 simulator:
   enabled: true
   plc_count: 3              # 3 simulated PLCs with realistic Modbus traffic
+  inject_anomalies: true    # Auto-injects 6 rotating OT security incident scenarios
 llm:
   provider: auto            # Auto routes: Groq -> Gemini -> Claude -> Ollama -> Rules
-  groq_model: llama-3.3-70b-versatile
+  groq_model: qwen/qwen3.8-27b
+  gemini_model: gemini-flash-latest
 ```
 
 ---
@@ -344,27 +352,54 @@ python core/capture/monitor.py config/live.yaml
 | **ML Scoring** | `IncrementalScorer` — hash-based cache, O(N_new) per refresh, auto cache invalidation |
 | **Threat Intel** | `ThreatIntelFeed` — CISA ICS-CERT RSS feed, offline cache, asset vendor matching |
 | **Air-Gapped Control** | Code-level `FeatureDisabledError` guard rails for zero-egress enforcement |
-| **LLM — Cloud Showcase** | Groq API (`llama-3.3-70b`) / Google Gemini API (`gemini-flash-latest`) — Free tier, sub-second |
+| **LLM — Cloud Showcase** | Groq API (`qwen/qwen3.8-27b` / `llama-3.1-8b`) / Google Gemini API (`gemini-flash-latest`) — Free tier, sub-second |
 | **LLM — Cloud High-End** | Anthropic Claude API (`claude-sonnet-4-6`) |
 | **LLM — Local Air-Gapped**| Ollama (`llama3.1` / `qwen2.5`) — zero data egress |
 | **LLM Tiering** | `should_invoke_llm` Security Guard vs Detective Model |
-| **MITRE ATT&CK** | ICS matrix only (T0xxx) — constrained in LLM system prompt |
+| **MITRE ATT&CK** | Static deterministic mapping table based on Modbus FC (e.g., FC 15/16 → T0836, FC 43 → T0846) |
 | **Dashboard** | Streamlit + Plotly (Cyber Dark Theme + 4 Tabs) |
 | **PDF Reports** | ReportLab (IEC 62443 SUC + Risk Register RS1-RS12) |
 | **Alerts** | smtplib + python-telegram-bot |
 
 ---
 
-## 📊 Local AI Benchmark
+## 📊 Air-Gapped Sizing & Hardware Tiering Guide
 
-To ensure optimal performance across different deployment environments, SecureBridge LLM engines are chosen based on empirical benchmarks against OT security workloads (e.g., incident summarization, FC sequence reasoning, MITRE mapping), rather than generic model popularity.
+SecureBridge engine operates at **Purdue Level 3.5 (Industrial DMZ)** rather than the physical field level (Level 0/1). Consequently, it does not require expensive IP66/fanless ruggedized field hardware. Standard Commercial Off-The-Shelf (COTS) server or industrial mini-PC hardware is fully sufficient.
 
-| Model               | Device Environment                 | Latency | Memory  | Verdict                  |
-| ------------------- | ---------------------------------- | ------- | ------- | ------------------------ |
-| Groq (Llama 3.3 70B)| Azure B1s (Cloud API)              | 1.2 s   | Cloud   | ⭐ **Demo Default**         |
-| Qwen2.5 3B (Ollama) | i7-11850H + 32GB + RTX A2000 4GB   | 2.8 s   | ~3–4 GB | ⭐ **Air-gapped Recommended**|
-| Phi-3 Mini (Ollama) | i7-11850H + 32GB + RTX A2000 4GB   | 1.9 s   | ~2–3 GB | ⭐ Fastest Local          |
-| Llama 3.1 8B        | i7-11850H + 32GB + RTX A2000 4GB   | 115 s   | ~8 GB   | ❌ Too heavy for 4GB VRAM |
+### Compute Workload Separation ("Security Guard vs Detective")
+1. **ML Anomaly Detection (24/7 Non-Stop)**: Isolation Forest operates entirely on **CPU** with minimal footprint (<5% CPU load). Real-time OT packet inspection and scoring never require a GPU.
+2. **LLM Deep Investigation (On-Demand)**: Local LLM inference (via Ollama) is invoked only when an analyst requests root-cause synthesis. Adding a GPU accelerates investigation turnaround but is not required for core perimeter defense.
+
+---
+
+### 3-Tier Hardware Sizing Matrix
+
+| Tier | Target Environment | Hardware Specification | Recommended Model | Quantization | AI Latency | Defense Integrity |
+|---|---|---|---|:---:|:---:|:---:|
+| **Tier 1: Entry / SME** | Single remote site, tight budget | Core i5/i7 (8-Core), 32GB RAM, **CPU-Only** (No GPU) | `qwen2.5:1.5b` / `qwen2.5:3b` | Q4_K_M | ~4–8 s (CPU) | ✅ 100% Real-time ML |
+| **Tier 2: Standard (Recommended)** | Standard plant deployment | Core i7/Xeon, 32-64GB RAM, **NVIDIA RTX A2000 (4-12GB)** | `qwen2.5:3b` | Q4_K_M | **~2–3 s (GPU)** | ✅ 100% Real-time ML |
+| **Tier 3: Enhanced / Multi-Site** | Multi-site central monitoring | Xeon Silver/EPYC, 64-128GB RAM, **NVIDIA RTX A5000 / L4 (24GB+)** | `qwen2.5:14b` / `qwen2.5:32b` | Q4_K_M | **~1–2 s (GPU)** | ✅ 100% Real-time ML |
+| **Cloud Showcase** | Online demo / Azure VM | Azure B2s (2 vCPU, 4GB RAM) | **Groq Llama 3.3 / Gemini** | Cloud API | **< 1.5 s** | ✅ Remote Showcase |
+
+```
+💡 Why Qwen2.5 as the Air-Gapped Default?
+Qwen2.5 models offer exceptional quantization efficiency. The 3B model (~2.2 GB VRAM footprint)
+fits entirely inside entry-level 4GB GPU VRAM (validated on development hardware RTX A2000 4GB).
+Larger models (such as Llama 3.1 8B requiring ~5.5 GB VRAM) experience partial CPU offloading on 4GB cards,
+making Qwen2.5 3B the mathematically optimal choice for cost-effective Tier 2 deployments.
+```
+
+### Seamless 1-Line Model Upgrade Path
+Upgrading across tiers requires zero code modification. Simply adjust a single configuration line in `config/live.yaml`:
+```yaml
+llm:
+  mode: air-gapped
+  ollama_model: qwen2.5:3b      # Switch to qwen2.5:14b when upgrading to Tier 3
+  ollama_host: http://localhost:11434
+```
+
+*> Note: Tier 2 deployment sizing is physically validated on development hardware (Intel i7 + 32GB RAM + NVIDIA RTX A2000 4GB). Tier 1 and Tier 3 specifications are mathematically projected based on model VRAM/RAM allocations.*
 
 ---
 
