@@ -38,7 +38,7 @@ compliance:
 llm:
   provider: auto                   # groq | auto | gemini | claude | ollama | air-gapped
   groq_model: qwen/qwen3.8-27b      # Confirmed available on this Groq API key
-  gemini_model: gemini-1.5-flash    # Stable free-tier model (not gemini-flash-latest alias)
+  gemini_model: gemini-flash-latest  # Works with deprecated google-generativeai SDK (v1beta)
   ollama_model: qwen2.5:3b       # Local model (run: ollama pull qwen2.5:3b)
   ollama_host: http://localhost:11434
   claude_model: claude-sonnet-4-6

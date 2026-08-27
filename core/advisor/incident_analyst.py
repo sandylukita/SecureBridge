@@ -130,7 +130,7 @@ Respond ONLY with valid JSON in this exact format:
     "Action 2 — specific and actionable"
   ],
   "iec62443_reference": {{
-    "requirement": "SR X.X",
+    "sr_id": "SR X.X",
     "title": "Requirement title",
     "description": "How this incident relates to this requirement"
   }},
