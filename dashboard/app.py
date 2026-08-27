@@ -290,20 +290,6 @@ with st.sidebar:
             use_container_width=True
         )
 
-    if config.mode != "live":
-        st.divider()
-        with st.expander("🛠️ Developer Tools [Internal]"):
-            st.caption("Internal test harness — not shown in executive/operations view.")
-            if st.button("💉 Inject Network Scan", use_container_width=True):
-                import subprocess
-                subprocess.Popen([sys.executable, "inject_demo.py", "frequency"])
-                st.toast("Injected network scan into event log!", icon="🚨")
-
-            if st.button("🔥 Inject Modbus Write", use_container_width=True):
-                import subprocess
-                subprocess.Popen([sys.executable, "inject_demo.py", "write"])
-                st.toast("Injected unauthorized write into event log!", icon="🚨")
-
     st.divider()
 
     st.markdown("### ⚙️ SOC Controls")
