@@ -140,7 +140,7 @@ services:
         ipv4_address: 172.20.20.10
     volumes:
       - ot_data:/app/data/logs         # Writable for demo injection
-      - ml_models:/app/data/models:ro  # Read-only models
+      - ml_models:/app/data/models    # Writable: dashboard caches scores + counters here
       - reports:/app/data/reports      # Write PDF reports
       - ./config:/app/config:ro
     environment:
