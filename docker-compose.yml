@@ -70,6 +70,7 @@ services:
     volumes:
       - ot_data:/app/data/logs
       - ./config:/app/config:ro
+      - ./core:/app/core:ro
     environment:
       - SECUREBRIDGE_MODE=lab
     restart: unless-stopped
@@ -143,6 +144,8 @@ services:
       - ml_models:/app/data/models    # Writable: dashboard caches scores + counters here
       - reports:/app/data/reports      # Write PDF reports
       - ./config:/app/config:ro
+      - ./dashboard:/app/dashboard:ro
+      - ./core:/app/core:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
