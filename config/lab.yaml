@@ -22,6 +22,10 @@ detection:
 alerts:
   email_enabled: false
   telegram_enabled: false
+  syslog_enabled: false              # Set true if testing with local SIEM/syslog listener
+  syslog_host: "127.0.0.1"
+  syslog_port: 514
+  syslog_protocol: "UDP"
   min_severity: "MEDIUM"
 
 dashboard:

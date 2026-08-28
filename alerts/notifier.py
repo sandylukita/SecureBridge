@@ -3,6 +3,7 @@ SecureBridge — Alert Notification Engine
 Multi-channel alerting for OT security events
 
 Channels:
+- Syslog Forwarding (RFC 5424 / CEF for Air-Gapped internal SIEM integration)
 - Email (SMTP)
 - Telegram Bot
 - Dashboard (via shared queue)
@@ -13,11 +14,12 @@ Respects minimum severity thresholds.
 import os
 import sys
 import smtplib
+import socket
 import logging
 import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,7 +40,7 @@ SEVERITY_RANK = {
 class AlertNotifier:
     """
     Multi-channel alert dispatcher
-    Sends alerts via Email and/or Telegram based on severity threshold
+    Sends alerts via Syslog (SIEM), Email, and/or Telegram based on severity threshold
     """
 
     def __init__(self, config: AlertConfig):
@@ -76,6 +78,14 @@ class AlertNotifier:
         # Send to all channels concurrently
         threads = []
 
+        if self.config.syslog_enabled:
+            t = threading.Thread(
+                target=self._send_syslog,
+                args=(severity, device_id, alert_message),
+                daemon=True
+            )
+            threads.append(t)
+
         if self.config.email_enabled:
             t = threading.Thread(
                 target=self._send_email,
@@ -101,9 +111,71 @@ class AlertNotifier:
         self._sent_count += 1
         logger.info(
             f"Alert dispatched: {severity} | {device_id} | "
-            f"Channels: email={self.config.email_enabled}, "
+            f"Channels: syslog={self.config.syslog_enabled}, "
+            f"email={self.config.email_enabled}, "
             f"telegram={self.config.telegram_enabled}"
         )
+
+    def _send_syslog(self, severity: str, device_id: str, body: str):
+        """
+        Send structured Syslog alert to internal SIEM (Splunk, QRadar, Sentinel).
+        Uses CEF (Common Event Format) / RFC 5424 compliant framing over UDP or TCP.
+        Preserves Air-Gapped Zero Data Egress (intra-plant communication).
+        """
+        if not self.config.syslog_host:
+            logger.warning("Syslog forwarding enabled but syslog_host is missing")
+            return
+
+        try:
+            # Map severity to syslog priority and CEF severity number (0-10)
+            cef_severity_map = {
+                "CRITICAL": 10,
+                "HIGH": 8,
+                "MEDIUM": 5,
+                "LOW": 2
+            }
+            cef_sev = cef_severity_map.get(severity, 5)
+
+            # Clean raw message into single-line format for syslog
+            clean_body = body.replace("\n", " ").replace("\r", " ").strip()
+            if len(clean_body) > 1000:
+                clean_body = clean_body[:997] + "..."
+
+            # CEF (ArcSight / Splunk / QRadar standard) payload:
+            # CEF:Version|Device Vendor|Device Product|Device Version|Signature ID|Name|Severity|Extension
+            timestamp_str = datetime.now(timezone.utc).isoformat()
+            hostname = socket.gethostname() or "securebridge-sensor"
+
+            cef_payload = (
+                f"CEF:0|PT Optima Sarana Instrument|SecureBridge|1.7.0|"
+                f"OT_ANOMALY|{severity} Alert on {device_id or 'OT-Device'}|{cef_sev}|"
+                f"dhost={device_id or 'unknown'} cat=OTSecurity "
+                f"rt={timestamp_str} msg={clean_body}\n"
+            )
+
+            # Facility 16 (local0) + Severity (3=Error for CRITICAL, 4=Warning for HIGH, 5=Notice for MEDIUM, 6=Info for LOW)
+            pri = 16 * 8 + (3 if severity == "CRITICAL" else 4 if severity == "HIGH" else 5 if severity == "MEDIUM" else 6)
+            syslog_msg = f"<{pri}>1 {timestamp_str} {hostname} SecureBridge - - - {cef_payload}".encode("utf-8")
+
+            # Socket dispatch
+            proto = self.config.syslog_protocol.upper()
+            if proto == "TCP":
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(5.0)
+                    sock.connect((self.config.syslog_host, self.config.syslog_port))
+                    sock.sendall(syslog_msg)
+            else:  # UDP default
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(5.0)
+                    sock.sendto(syslog_msg, (self.config.syslog_host, self.config.syslog_port))
+
+            logger.info(
+                f"Syslog forwarded to {self.config.syslog_host}:{self.config.syslog_port} ({proto}) | {severity}"
+            )
+
+        except Exception as e:
+            self._failed_count += 1
+            logger.error(f"Syslog forwarding failed: {e}")
 
     def _send_email(self, subject: str, body: str):
         """Send email alert via SMTP"""

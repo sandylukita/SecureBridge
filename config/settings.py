@@ -48,6 +48,12 @@ class AlertConfig:
     telegram_enabled: bool = False
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    # Syslog Forwarding (RFC 5424 / CEF for Air-Gapped internal SIEM integration)
+    syslog_enabled: bool = False
+    syslog_host: str = "127.0.0.1"
+    syslog_port: int = 514
+    syslog_protocol: str = "UDP"       # UDP | TCP
+    syslog_facility: str = "LOG_LOCAL0"
     min_severity: str = "HIGH"
 
 
@@ -164,6 +170,11 @@ def load_config(config_path: str = "config/active.yaml") -> SecureBridgeConfig:
             telegram_enabled=a.get("telegram_enabled", False),
             telegram_token=a.get("telegram_token", ""),
             telegram_chat_id=a.get("telegram_chat_id", ""),
+            syslog_enabled=a.get("syslog_enabled", False),
+            syslog_host=a.get("syslog_host", "127.0.0.1"),
+            syslog_port=a.get("syslog_port", 514),
+            syslog_protocol=a.get("syslog_protocol", "UDP"),
+            syslog_facility=a.get("syslog_facility", "LOG_LOCAL0"),
             min_severity=a.get("min_severity", "HIGH"),
         )
 
@@ -206,6 +217,9 @@ def save_config(config: SecureBridgeConfig, path: str):
         "alerts": {
             "email_enabled": config.alerts.email_enabled,
             "telegram_enabled": config.alerts.telegram_enabled,
+            "syslog_enabled": config.alerts.syslog_enabled,
+            "syslog_host": config.alerts.syslog_host,
+            "syslog_port": config.alerts.syslog_port,
             "min_severity": config.alerts.min_severity,
         },
         "compliance": {
